@@ -2,6 +2,17 @@
 
 Measurements from building the decoder, newest first. All on one M5 Max (36 GB) with Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy unless noted. Raw JSON for the scenario sweeps is in [results/](../results); the agentic coding eval mentioned below is a separate private suite (10 coding-agent tasks, 3 trials each, pass/fail graded) and is not part of this repo.
 
+# Comparison with MTPLX's own MTP decoding (2026-10-25)
+
+Only one matched comparison exists so far: the agentic eval below (same 10 tasks x 3), where the tree server
+did +24% output tokens per second of model time sequentially (48.9 vs 39.4) and finished 2.1x sooner with 4
+sessions in parallel (29.2 vs 62.4 min). The MTPLX run used the AX MXFP4 build and the tree server the 4-bit
+affine build; MTPLX itself is 10-15% faster on the 4-bit build in `bench/runtimes`, so part of the +24% is the
+build. The tree server has not been run through `bench/runtimes` (S1 context sweep, S2 task mix), so there is
+no like-for-like single-request tok/s against MTPLX's MTP depth 3 yet. Different prompts suggest ~1.5x at
+28-32K context (61-63 vs 39.5 tok/s) and 93-102 vs 55-60 tok/s on short code, but text type moves these
+numbers a lot.
+
 # Batching server (2026-10-25)
 
 `mlx-tree-spec-server --max-batch 4`: continuous batching. tree_verify is batch-aware (batch_forward / batch_gdn / batch_attention / batch_mtp_entries / batch_pass / batch_draft; ForkState + batch_step); one request is bit-identical to the old single-request code (passes, drafts, decode checked against a saved reference). Requests share matmuls, norms, MLPs, the MTP layer and the draft head; GatedDeltaNet recurrence and attention run per request. Node cap per request: 16 total for 2, 32 for 3-4, 48 for 5+. A request whose client disconnects is dropped at the next step.
@@ -86,5 +97,6 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - End to end: plain decoding +1%; speculative configs within noise (-3% to +2%). Worth it for memory, not speed. Outputs first differ from bf16 KV after ~110-1450 tokens.
 
 ## Open
+- Run the tree server through `bench/runtimes` S1/S2 on Swift 1.5 4-bit (same build as config C2) for a like-for-like table against MTPLX MTP.
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.
 - Drafting one chain at 27.9K still costs ~2 ms per MTP call (vs 1.2 at short context).

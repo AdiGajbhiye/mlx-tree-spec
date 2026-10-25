@@ -1,0 +1,125 @@
+[
+  {
+    "prompt": "A train leaves at 9:40 and arrives at 13:05. It stops twice for 12 minutes each. How long was it moving? Show your steps.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 23.995546956091985
+    },
+    "chain d3 k1 w1 b3 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 74.0209680997021,
+      "diverges_at": 15,
+      "steps": 57,
+      "decode_s": 2.688427416025661,
+      "prefill_s": 0.14174579200334847,
+      "tokens_per_step": 3.508771929824561,
+      "mean_rows": 1.0,
+      "mean_nodes": 3.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 4.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 2.688427416025661,
+      "spec_hit_rate": null
+    },
+    "chain d6 k1 w1 b6 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 94.2651107926473,
+      "diverges_at": 15,
+      "steps": 41,
+      "decode_s": 2.111067375051789,
+      "prefill_s": 0.13087466696742922,
+      "tokens_per_step": 4.878048780487805,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 2.111067375051789,
+      "spec_hit_rate": null
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 101.21476583578,
+      "diverges_at": 15,
+      "steps": 37,
+      "decode_s": 1.9661162910051644,
+      "prefill_s": 0.13737750006839633,
+      "tokens_per_step": 5.405405405405405,
+      "mean_rows": 1.0,
+      "mean_nodes": 7.135135135135135,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.135135135135135,
+      "depth_hist": {
+        "7": 36,
+        "12": 1
+      },
+      "draft_s": 0.0,
+      "verify_s": 1.9661162910051644,
+      "spec_hit_rate": null
+    }
+  },
+  {
+    "prompt": "List ten interesting facts about octopuses, one sentence each.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 23.99850907666977
+    },
+    "chain d3 k1 w1 b3 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 50.34642048661923,
+      "diverges_at": 9,
+      "steps": 84,
+      "decode_s": 3.952614666079171,
+      "prefill_s": 0.07624820899218321,
+      "tokens_per_step": 2.369047619047619,
+      "mean_rows": 1.0,
+      "mean_nodes": 3.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 4.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 3.952614666079171,
+      "spec_hit_rate": null
+    },
+    "chain d6 k1 w1 b6 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 50.947403019204465,
+      "diverges_at": 9,
+      "steps": 76,
+      "decode_s": 3.905989082995802,
+      "prefill_s": 0.07424949994310737,
+      "tokens_per_step": 2.6184210526315788,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 3.905989082995802,
+      "spec_hit_rate": null
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 50.06948556429519,
+      "diverges_at": 9,
+      "steps": 77,
+      "decode_s": 3.9744766249787062,
+      "prefill_s": 0.07408445898909122,
+      "tokens_per_step": 2.5844155844155843,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.12987012987013,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.12987012987013,
+      "depth_hist": {
+        "5": 13,
+        "6": 41,
+        "7": 23
+      },
+      "draft_s": 0.0,
+      "verify_s": 3.9744766249787062,
+      "spec_hit_rate": null
+    }
+  }
+]

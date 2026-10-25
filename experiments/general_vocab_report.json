@@ -1,0 +1,12 @@
+{
+  "prompts": 50,
+  "train_tokens": 10951,
+  "held_tokens": 2833,
+  "distinct_train": 3480,
+  "code_size": 65536,
+  "merged_size": 65984,
+  "added": 448,
+  "held_coverage_code": 0.9763501588422168,
+  "held_coverage_merged": 0.9770561242499117,
+  "train_coverage_code": 0.9423796913523879
+}

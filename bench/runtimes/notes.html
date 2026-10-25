@@ -1,0 +1,50 @@
+<section>
+  <h2>How this was measured</h2>
+  <div class="method">
+    <div>
+      <h3>Requests</h3>
+      <p>One server at a time on port 8000, driven by the same streaming OpenAI-compatible client. Temperature 0, up to 512 output tokens, thinking off where the server allows it. Every prompt starts with a random ID, so no engine can reuse a cached prefix.</p>
+    </div>
+    <div>
+      <h3>Metrics</h3>
+      <p>Prefill = prompt tokens ÷ time to first token (TTFT includes one decode step). Decode = (output tokens − 1) ÷ time from first to last streamed token. Token counts come from each server's own usage report.</p>
+    </div>
+    <div>
+      <h3>Runs</h3>
+      <p>One warmup request after each server start, then 3 measured runs per cell (2 at 32k), median reported. 60 s cool-down between configurations. Mac on AC power with caffeinate; other apps stayed open.</p>
+    </div>
+    <div>
+      <h3>Prompts</h3>
+      <p>Context sweep: real CPython stdlib source trimmed to exactly 128 to 32,768 tokens, then "summarize and write tests". Task mix: short prompts for code, prose, math, JSON and creative writing, plus a 2.7k-token file-edit prompt.</p>
+    </div>
+  </div>
+  <div class="note"><b>Lithos on this chip.</b> lithos-metal 0.1.2 treats the 32-core M5 Max as an unmeasured fallback backend: no megakernel fusion and no tensor accelerator. Prefill runs at about 3 tok/s (roughly 33 s per 128-token chunk). Larger prefill chunks crashed the GPU (256 ran out of memory, 1024 page-faulted), and the DSpark draft ran out of memory with a 36k context, so both Lithos configs ran with <code>--max-context 4096</code> and only the 128 and 1k context points. The project's published 200+ tok/s figures are for the 40-core M5 Max.</div>
+  <div class="method">
+    <div>
+      <h3>Things to know</h3>
+      <p><b>Context copy.</b> MTPLX turns on "context copy" by default, which drafts by copying spans from the prompt. C2 and E2 include it; C2n and E2n set <code>MTPLX_CONTEXT_COPY=0</code> to show MTP alone. mlx-dspark ran with <code>--no-lookup-drafts</code>.</p>
+      <p><b>Swift 4-bit on MTPLX.</b> MTPLX refuses the ukisai checkpoint because of its vision-encoder tensors, so C1/C2 use a text-only copy (the 501 <code>visual.*</code> tensors removed, all other weights byte-identical).</p>
+      <p><b>Different weights.</b> Lithos and mlx-dspark run base Qwen3.8 27B; the others run the Swift 1.5 fine-tune. The quantizations differ too (NVFP4, affine 4-bit, MXFP4, IQ3_S). Compare speeds, not output quality.</p>
+      <p><b>Memory.</b> Three MTPLX requests (E1 at 4k and on the edit task, E2n at 8k) were refused by its memory guard while other apps held memory; the other runs of those cells succeeded and the failed ones are left out. The same guard shrinks prefill when free memory is low, so MTPLX no-MTP prefill at 4k–8k varied between about 525 and 790 tok/s from run to run.</p>
+    </div>
+    <div>
+      <h3>Server commands</h3>
+      <div class="scroll"><div class="cmd">A1  lithos-metal serve --model nvidia/Qwen3.8-27B-NVFP4 --no-draft --max-context 4096
+A2  lithos-metal serve --model nvidia/Qwen3.8-27B-NVFP4 --max-context 4096
+B1  mlx-dspark serve --model mlx-community/Qwen3.8-27B-4bit --mode baseline
+B2  mlx-dspark serve … --mode dflash --drafter incoai/Qwen3.8-27B-DFlash2
+B3  mlx-dspark serve … --mode dspark --drafter RedHatAI/Qwen3.8-27B-speculator.dspark
+    (all B: --no-lookup-drafts --no-prefix-cache --no-thinking --context-window 36864)
+C1  mtplx serve --model Swift-1.5-4bit-MLX-text --generation-mode ar --no-mtp
+C2  mtplx serve --model Swift-1.5-4bit-MLX-text --generation-mode mtp --mtp --depth 3
+C2n MTPLX_CONTEXT_COPY=0 + the C2 command
+    (all MTPLX: --profile sustained --ssd-session-cache off)
+C3  ~/.local/share/swift15-mlx/4bit/serve   (ukisai's patched mlx-lm)
+D1  llama-server -m Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf -c 36864 -np 1
+D2  llama-server -m …IQ3_S-mtp.gguf --spec-type draft-mtp -c 36864 -np 1
+E1  mtplx serve --model AX-Swift-1.5-MXFP4-MTP --generation-mode ar --no-mtp
+E2  mtplx serve --model AX-Swift-1.5-MXFP4-MTP --generation-mode mtp --mtp --depth 3
+E2n MTPLX_CONTEXT_COPY=0 + the E2 command</div></div>
+    </div>
+  </div>
+</section>

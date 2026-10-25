@@ -1,0 +1,10 @@
+Write a complete, production-quality Python module `kvstore.py` implementing a persistent key-value store. Requirements:
+- string keys, JSON-serializable values; get/put/delete/scan(prefix) API
+- durability through a write-ahead log with fsync and crash recovery on startup
+- periodic compaction of the log into a snapshot file, done atomically
+- an in-memory LRU read cache with a configurable size
+- optional per-key TTL expiry
+- thread safety for concurrent readers and writers
+- a small argparse CLI (get, put, delete, scan, compact)
+- full type hints and docstrings
+After the module, write a thorough pytest test suite covering every feature, including crash recovery and concurrency. Output the complete code.

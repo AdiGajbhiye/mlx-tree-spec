@@ -1,0 +1,365 @@
+<title>Qwen3.8 27B on M5 Max</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column of findings, then wide data panels (charts + heat tables) that scroll sideways on phones. */
+:root {
+  --bg: #f6f7f8;
+  --surface: #fdfdfd;
+  --ink: #101418;
+  --ink-2: #4a525b;
+  --muted: #7f8790;
+  --rule: #dfe3e7;
+  --axis: #c2c8ce;
+  --heat: #2a78d6;
+  --neg: #d03b3b;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
+  --warn-bg: #fff4e0; --warn-ink: #7a4b00;
+  --f-display: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --f-data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1215; --surface: #171b1f; --ink: #eef1f4; --ink-2: #b9c0c7; --muted: #848c95;
+    --rule: #2a3036; --axis: #3a4148; --heat: #3987e5; --neg: #e66767;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
+    --warn-bg: #2e2412; --warn-ink: #f2c46b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1215; --surface: #171b1f; --ink: #eef1f4; --ink-2: #b9c0c7; --muted: #848c95;
+  --rule: #2a3036; --axis: #3a4148; --heat: #3987e5; --neg: #e66767;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
+  --warn-bg: #2e2412; --warn-ink: #f2c46b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 1120px; margin: 0 auto; padding-block: 40px 72px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 48px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(28px, 4.2vw, 42px); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+h3 { font-size: 15px; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font-family: var(--f-data); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: 16px; }
+.lede { color: var(--ink-2); font-size: 17px; }
+.specs { display: flex; flex-wrap: wrap; gap: 8px; }
+.spec { font-family: var(--f-data); font-size: 12.5px; padding: 4px 10px; border: 1px solid var(--rule); border-radius: 999px; color: var(--ink-2); background: var(--surface); }
+section { display: grid; gap: 16px; min-width: 0; }
+.findings { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px 32px; padding: 0; margin: 0; list-style: none; }
+.findings li { display: grid; gap: 4px; padding-top: 12px; border-top: 2px solid var(--ink); min-width: 0; }
+.findings b { font-family: var(--f-display); font-size: 16px; }
+.findings span { color: var(--ink-2); }
+.num { font-family: var(--f-data); font-variant-numeric: tabular-nums; }
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 20px; display: grid; gap: 14px; min-width: 0; }
+.panel .sub { color: var(--ink-2); font-size: 14px; }
+.scroll { overflow-x: auto; min-width: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); }
+.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; min-width: 560px; }
+.chart text { font-family: var(--f-data); font-size: 11px; fill: var(--muted); }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 190px; }
+.tip .row { display: flex; justify-content: space-between; gap: 14px; }
+.tip .row span:first-child::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--c); }
+table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13.5px; }
+th, td { padding: 7px 10px; text-align: right; white-space: nowrap; }
+th { font-family: var(--f-data); font-weight: 500; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--axis); }
+td { font-family: var(--f-data); font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--rule); }
+th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--surface); }
+td:first-child { font-family: var(--f-body); }
+td:first-child .id { font-family: var(--f-data); font-size: 12px; color: var(--muted); margin-right: 8px; }
+td:first-child .what { color: var(--ink); }
+td:first-child .how { color: var(--muted); font-size: 12.5px; }
+tr.group td { font-family: var(--f-data); font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding-top: 16px; border-bottom: 1px solid var(--axis); }
+td.na { color: var(--muted); }
+.note { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 12px 14px; font-size: 14px; }
+.method { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 32px; }
+.method div { display: grid; gap: 6px; min-width: 0; }
+.method p { color: var(--ink-2); font-size: 14px; }
+code { font-family: var(--f-data); font-size: 12.5px; }
+.cmd { font-family: var(--f-data); font-size: 12px; color: var(--ink-2); white-space: pre; }
+footer { color: var(--muted); font-size: 13px; }
+@media (max-width: 520px) { .panel { padding: 14px; } body { font-size: 14.5px; } }
+</style>
+
+<div class="page">
+<header>
+  <div class="eyebrow">Local inference benchmark · 17 Oct 2026</div>
+  <h1>Qwen3.8 27B on a 32‑core M5 Max</h1>
+  <p class="lede">Prefill and decode speed for Qwen3.8 27B and its Swift 1.5 fine-tune across five engines, with and without draft models, from a 128-token prompt to 32k tokens of context.</p>
+  <div class="specs">
+    <span class="spec">MacBook Pro Mac17,6</span><span class="spec">M5 Max · 32-core GPU</span><span class="spec">36 GB unified</span><span class="spec">macOS 26.6.2</span><span class="spec">temperature 0 · 512 output tokens</span>
+  </div>
+</header>
+
+<section>
+  <h2>What the numbers say</h2>
+  <ul class="findings">
+    <li><b>A draft model roughly doubles decode on MLX engines</b><span>mlx-dspark with RedHat's DSpark draft reaches <span class="num">57–60</span> tok/s up to 4k context, against <span class="num">26</span> without a draft. MTPLX with MTP gets Swift 4-bit to <span class="num">53–54</span>, against <span class="num">25</span>.</span></li>
+    <li><b>Drafts lose ground as context grows</b><span>At 32k the MLX draft setups fall to <span class="num">36–40</span> tok/s, a <span class="num">1.6–1.8×</span> gain instead of the <span class="num">2.0–2.5×</span> they get on short code prompts. MTPLX + MTP holds up best at 32k (<span class="num">39.2</span>), just ahead of DSpark (<span class="num">37.2</span>).</span></li>
+    <li><b>DSpark beat DFlash2 on the same engine</b><span>On mlx-dspark, the DSpark draft was faster than DFlash2 at every context length and on 5 of 6 tasks, and tied on math. DFlash2's drafts are accepted slightly more often, but DSpark costs less per round.</span></li>
+    <li><b>llama.cpp MTP barely helps IQ3_S</b><span>MTP adds <span class="num">16–37%</span> on code, math, JSON and edits but is slower on prose (<span class="num">0.94×</span>) and creative writing (<span class="num">0.82×</span>). Without a draft, IQ3_S is the fastest decoder here (<span class="num">27.6</span> tok/s) because its weights are smallest.</span></li>
+    <li><b>Prefill: mlx-dspark leads, llama.cpp trails</b><span>About <span class="num">800</span> tok/s at 4–8k on mlx-dspark, <span class="num">760–780</span> on MTPLX, <span class="num">570</span> on llama.cpp. A 32k prompt takes <span class="num">46 s</span> to first token on mlx-dspark and <span class="num">67 s</span> on llama.cpp. Drafts don't change prefill.</span></li>
+    <li><b>Lithos doesn't run well on the 32-core chip</b><span>lithos-metal has no tuned setup for this GPU. It decodes at <span class="num">17.5</span> tok/s without a draft, but prefill is about <span class="num">3</span> tok/s, and DSpark makes decode slower, not faster (<span class="num">5–15</span> tok/s on most tasks).</span></li>
+    <li><b>MXFP4 vs 4-bit Swift: same without MTP</b><span>The AX MXFP4 and ukisai 4-bit models decode at the same speed without a draft (<span class="num">25.1</span> vs <span class="num">24.8</span>). With MTP the ukisai weights are <span class="num">13–17%</span> faster on the task mix, though nearly even on the 1k-context run.</span></li>
+    <li><b>Context copy only matters for edits</b><span>MTPLX's default prompt-copy drafting takes the file-edit task from <span class="num">69</span> to <span class="num">158</span> tok/s. On every other task it makes no measurable difference.</span></li>
+  </ul>
+</section>
+
+
+<section>
+  <h2>Decode speed as context grows</h2>
+  <div class="panel">
+    <p class="sub">Generation speed after a prompt of the given length (the summarize-and-write-tests task). Each point is the median of 3 runs (2 at 32k). Hover for values.</p>
+    <div class="legend" id="leg-decode"></div>
+    <div class="scroll"><div class="chart" id="chart-decode"></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Prefill speed as context grows</h2>
+  <div class="panel">
+    <p class="sub">Prompt tokens divided by time to first token, for each engine without a draft. Drafts don't change prefill (see the table below). Lithos is left off: it prefills at about 3 tok/s on this chip.</p>
+    <div class="legend" id="leg-prefill"></div>
+    <div class="scroll"><div class="chart" id="chart-prefill"></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>All configurations</h2>
+  <div class="panel">
+    <h3>Decode tok/s by context length</h3>
+    <div class="scroll"><table id="t-decode"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Prefill tok/s by context length</h3>
+    <div class="scroll"><table id="t-prefill"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Time to first token (seconds)</h3>
+    <div class="scroll"><table id="t-ttft"></table></div>
+  </div>
+</section>
+
+<section>
+  <h2>Task mix: what the draft is good at</h2>
+  <div class="panel">
+    <h3>Decode tok/s by task, short prompt</h3>
+    <p class="sub">Six kinds of output. Without a draft every task decodes at the same speed. With a draft, speed depends on how predictable the text is. The edit task rewrites a 250-line file with small changes, so most of the output can be copied from the prompt.</p>
+    <div class="scroll"><table id="t-tasks"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Speedup over the same engine without a draft</h3>
+    <p class="sub">Blue is faster, red is slower than the no-draft run on the same engine and weights.</p>
+    <div class="scroll"><table id="t-speedup"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Draft acceptance</h3>
+    <p class="sub">Share of drafted tokens the target accepted (MTP engines), or mean tokens committed per target pass (mlx-dspark). Lithos doesn't report it.</p>
+    <div class="scroll"><table id="t-accept"></table></div>
+  </div>
+</section>
+
+<section>
+  <h2>How this was measured</h2>
+  <div class="method">
+    <div>
+      <h3>Requests</h3>
+      <p>One server at a time on port 8000, driven by the same streaming OpenAI-compatible client. Temperature 0, up to 512 output tokens, thinking off where the server allows it. Every prompt starts with a random ID, so no engine can reuse a cached prefix.</p>
+    </div>
+    <div>
+      <h3>Metrics</h3>
+      <p>Prefill = prompt tokens ÷ time to first token (TTFT includes one decode step). Decode = (output tokens − 1) ÷ time from first to last streamed token. Token counts come from each server's own usage report.</p>
+    </div>
+    <div>
+      <h3>Runs</h3>
+      <p>One warmup request after each server start, then 3 measured runs per cell (2 at 32k), median reported. 60 s cool-down between configurations. Mac on AC power with caffeinate; other apps stayed open.</p>
+    </div>
+    <div>
+      <h3>Prompts</h3>
+      <p>Context sweep: real CPython stdlib source trimmed to exactly 128 to 32,768 tokens, then "summarize and write tests". Task mix: short prompts for code, prose, math, JSON and creative writing, plus a 2.7k-token file-edit prompt.</p>
+    </div>
+  </div>
+  <div class="note"><b>Lithos on this chip.</b> lithos-metal 0.1.2 treats the 32-core M5 Max as an unmeasured fallback backend: no megakernel fusion and no tensor accelerator. Prefill runs at about 3 tok/s (roughly 33 s per 128-token chunk). Larger prefill chunks crashed the GPU (256 ran out of memory, 1024 page-faulted), and the DSpark draft ran out of memory with a 36k context, so both Lithos configs ran with <code>--max-context 4096</code> and only the 128 and 1k context points. The project's published 200+ tok/s figures are for the 40-core M5 Max.</div>
+  <div class="method">
+    <div>
+      <h3>Things to know</h3>
+      <p><b>Context copy.</b> MTPLX turns on "context copy" by default, which drafts by copying spans from the prompt. C2 and E2 include it; C2n and E2n set <code>MTPLX_CONTEXT_COPY=0</code> to show MTP alone. mlx-dspark ran with <code>--no-lookup-drafts</code>.</p>
+      <p><b>Swift 4-bit on MTPLX.</b> MTPLX refuses the ukisai checkpoint because of its vision-encoder tensors, so C1/C2 use a text-only copy (the 501 <code>visual.*</code> tensors removed, all other weights byte-identical).</p>
+      <p><b>Different weights.</b> Lithos and mlx-dspark run base Qwen3.8 27B; the others run the Swift 1.5 fine-tune. The quantizations differ too (NVFP4, affine 4-bit, MXFP4, IQ3_S). Compare speeds, not output quality.</p>
+      <p><b>Memory.</b> Three MTPLX requests (E1 at 4k and on the edit task, E2n at 8k) were refused by its memory guard while other apps held memory; the other runs of those cells succeeded and the failed ones are left out. The same guard shrinks prefill when free memory is low, so MTPLX no-MTP prefill at 4k–8k varied between about 525 and 790 tok/s from run to run.</p>
+    </div>
+    <div>
+      <h3>Server commands</h3>
+      <div class="scroll"><div class="cmd">A1  lithos-metal serve --model nvidia/Qwen3.8-27B-NVFP4 --no-draft --max-context 4096
+A2  lithos-metal serve --model nvidia/Qwen3.8-27B-NVFP4 --max-context 4096
+B1  mlx-dspark serve --model mlx-community/Qwen3.8-27B-4bit --mode baseline
+B2  mlx-dspark serve … --mode dflash --drafter incoai/Qwen3.8-27B-DFlash2
+B3  mlx-dspark serve … --mode dspark --drafter RedHatAI/Qwen3.8-27B-speculator.dspark
+    (all B: --no-lookup-drafts --no-prefix-cache --no-thinking --context-window 36864)
+C1  mtplx serve --model Swift-1.5-4bit-MLX-text --generation-mode ar --no-mtp
+C2  mtplx serve --model Swift-1.5-4bit-MLX-text --generation-mode mtp --mtp --depth 3
+C2n MTPLX_CONTEXT_COPY=0 + the C2 command
+    (all MTPLX: --profile sustained --ssd-session-cache off)
+C3  ~/.local/share/swift15-mlx/4bit/serve   (ukisai's patched mlx-lm)
+D1  llama-server -m Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf -c 36864 -np 1
+D2  llama-server -m …IQ3_S-mtp.gguf --spec-type draft-mtp -c 36864 -np 1
+E1  mtplx serve --model AX-Swift-1.5-MXFP4-MTP --generation-mode ar --no-mtp
+E2  mtplx serve --model AX-Swift-1.5-MXFP4-MTP --generation-mode mtp --mtp --depth 3
+E2n MTPLX_CONTEXT_COPY=0 + the E2 command</div></div>
+    </div>
+  </div>
+</section>
+
+
+<footer>Raw data: <code>bench/runtimes/results.jsonl</code> · scripts: <code>bench.py</code>, <code>run_all.sh</code>, <code>summarize.py</code> · server logs in <code>logs/</code></footer>
+</div>
+
+<script>
+const D = {"summary": {"D1": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 201, "gen_tokens": 512, "ttft_s": 0.54, "prefill_tps": 368.71, "decode_tps": 27.64, "accept_rate": null, "accept_len": null}, "longctx@1024": {"n": 3, "prompt_tokens": 1099, "gen_tokens": 512, "ttft_s": 2.07, "prefill_tps": 530.67, "decode_tps": 27.44, "accept_rate": null, "accept_len": null}, "longctx@4096": {"n": 3, "prompt_tokens": 4171, "gen_tokens": 512, "ttft_s": 7.32, "prefill_tps": 569.73, "decode_tps": 26.83, "accept_rate": null, "accept_len": null}, "longctx@8192": {"n": 3, "prompt_tokens": 8266, "gen_tokens": 512, "ttft_s": 14.66, "prefill_tps": 563.73, "decode_tps": 26.26, "accept_rate": null, "accept_len": null}, "longctx@16384": {"n": 3, "prompt_tokens": 16457, "gen_tokens": 512, "ttft_s": 30.53, "prefill_tps": 538.99, "decode_tps": 25.01, "accept_rate": null, "accept_len": null}, "longctx@32768": {"n": 2, "prompt_tokens": 32840.5, "gen_tokens": 512.0, "ttft_s": 67.07, "prefill_tps": 489.65, "decode_tps": 22.82, "accept_rate": null, "accept_len": null}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 512, "ttft_s": 0.36, "prefill_tps": 216.92, "decode_tps": 27.58, "accept_rate": null, "accept_len": null}, "prose@0": {"n": 3, "prompt_tokens": 84, "gen_tokens": 512, "ttft_s": 0.37, "prefill_tps": 228.27, "decode_tps": 27.59, "accept_rate": null, "accept_len": null}, "math@0": {"n": 3, "prompt_tokens": 132, "gen_tokens": 512, "ttft_s": 0.4, "prefill_tps": 325.95, "decode_tps": 27.57, "accept_rate": null, "accept_len": null}, "json@0": {"n": 3, "prompt_tokens": 94, "gen_tokens": 512, "ttft_s": 0.37, "prefill_tps": 253.75, "decode_tps": 27.56, "accept_rate": null, "accept_len": null}, "edit@0": {"n": 3, "prompt_tokens": 2697, "gen_tokens": 512, "ttft_s": 4.84, "prefill_tps": 556.61, "decode_tps": 27.13, "accept_rate": null, "accept_len": null}, "creative@0": {"n": 3, "prompt_tokens": 81, "gen_tokens": 512, "ttft_s": 0.38, "prefill_tps": 214.8, "decode_tps": 27.59, "accept_rate": null, "accept_len": null}}}, "D2": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 203, "gen_tokens": 512, "ttft_s": 0.56, "prefill_tps": 363.22, "decode_tps": 27.77, "accept_rate": 0.62, "accept_len": null}, "longctx@1024": {"n": 3, "prompt_tokens": 1096, "gen_tokens": 512, "ttft_s": 2.13, "prefill_tps": 513.39, "decode_tps": 30.95, "accept_rate": 0.73, "accept_len": null}, "longctx@4096": {"n": 3, "prompt_tokens": 4170, "gen_tokens": 512, "ttft_s": 7.56, "prefill_tps": 551.8, "decode_tps": 30.31, "accept_rate": 0.74, "accept_len": null}, "longctx@8192": {"n": 3, "prompt_tokens": 8265, "gen_tokens": 512, "ttft_s": 15.13, "prefill_tps": 546.1, "decode_tps": 29.83, "accept_rate": 0.75, "accept_len": null}, "longctx@16384": {"n": 3, "prompt_tokens": 16454, "gen_tokens": 512, "ttft_s": 31.59, "prefill_tps": 520.8, "decode_tps": 28.39, "accept_rate": 0.75, "accept_len": null}, "longctx@32768": {"n": 2, "prompt_tokens": 32840.0, "gen_tokens": 512.0, "ttft_s": 69.94, "prefill_tps": 469.58, "decode_tps": 26.8, "accept_rate": 0.75, "accept_len": null}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 80, "gen_tokens": 512, "ttft_s": 0.45, "prefill_tps": 179.46, "decode_tps": 32.01, "accept_rate": 0.81, "accept_len": null}, "prose@0": {"n": 3, "prompt_tokens": 85, "gen_tokens": 512, "ttft_s": 0.38, "prefill_tps": 222.95, "decode_tps": 25.92, "accept_rate": 0.58, "accept_len": null}, "math@0": {"n": 3, "prompt_tokens": 134, "gen_tokens": 512, "ttft_s": 0.55, "prefill_tps": 249.13, "decode_tps": 34.08, "accept_rate": 0.86, "accept_len": null}, "json@0": {"n": 3, "prompt_tokens": 95, "gen_tokens": 512, "ttft_s": 0.38, "prefill_tps": 245.5, "decode_tps": 35.44, "accept_rate": 0.91, "accept_len": null}, "edit@0": {"n": 3, "prompt_tokens": 2695, "gen_tokens": 512, "ttft_s": 4.99, "prefill_tps": 539.51, "decode_tps": 37.05, "accept_rate": 0.98, "accept_len": null}, "creative@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 512, "ttft_s": 0.37, "prefill_tps": 211.56, "decode_tps": 22.63, "accept_rate": 0.46, "accept_len": null}}}, "C1": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 201, "gen_tokens": 512, "ttft_s": 0.4, "prefill_tps": 504.02, "decode_tps": 24.79, "accept_rate": null, "accept_len": 1.0}, "longctx@1024": {"n": 3, "prompt_tokens": 1100, "gen_tokens": 512, "ttft_s": 1.51, "prefill_tps": 726.11, "decode_tps": 24.56, "accept_rate": null, "accept_len": 1.0}, "longctx@4096": {"n": 3, "prompt_tokens": 4167, "gen_tokens": 512, "ttft_s": 7.85, "prefill_tps": 530.95, "decode_tps": 24.01, "accept_rate": null, "accept_len": 1.0}, "longctx@8192": {"n": 3, "prompt_tokens": 8263, "gen_tokens": 512, "ttft_s": 13.23, "prefill_tps": 624.41, "decode_tps": 23.62, "accept_rate": null, "accept_len": 1.0}, "longctx@16384": {"n": 3, "prompt_tokens": 16458, "gen_tokens": 512, "ttft_s": 24.91, "prefill_tps": 660.65, "decode_tps": 22.77, "accept_rate": null, "accept_len": 1.0}, "longctx@32768": {"n": 2, "prompt_tokens": 32841.5, "gen_tokens": 512.0, "ttft_s": 50.68, "prefill_tps": 647.98, "decode_tps": 21.41, "accept_rate": null, "accept_len": 1.0}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 78, "gen_tokens": 512, "ttft_s": 0.24, "prefill_tps": 304.25, "decode_tps": 24.57, "accept_rate": null, "accept_len": 1.0}, "prose@0": {"n": 3, "prompt_tokens": 80, "gen_tokens": 512, "ttft_s": 0.24, "prefill_tps": 335.17, "decode_tps": 24.75, "accept_rate": null, "accept_len": 1.0}, "math@0": {"n": 3, "prompt_tokens": 132, "gen_tokens": 512, "ttft_s": 0.33, "prefill_tps": 395.23, "decode_tps": 24.78, "accept_rate": null, "accept_len": 1.0}, "json@0": {"n": 3, "prompt_tokens": 95, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 381.55, "decode_tps": 24.82, "accept_rate": null, "accept_len": 1.0}, "edit@0": {"n": 3, "prompt_tokens": 2695, "gen_tokens": 512, "ttft_s": 4.86, "prefill_tps": 555.41, "decode_tps": 24.3, "accept_rate": null, "accept_len": 1.0}, "creative@0": {"n": 3, "prompt_tokens": 80, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 301.5, "decode_tps": 24.72, "accept_rate": null, "accept_len": 1.0}}}, "C2": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 203, "gen_tokens": 512, "ttft_s": 0.41, "prefill_tps": 498.03, "decode_tps": 55.14, "accept_rate": 0.65, "accept_len": 2.95}, "longctx@1024": {"n": 3, "prompt_tokens": 1095, "gen_tokens": 512, "ttft_s": 1.53, "prefill_tps": 714.67, "decode_tps": 55.42, "accept_rate": 0.7, "accept_len": 3.1}, "longctx@4096": {"n": 3, "prompt_tokens": 4170, "gen_tokens": 512, "ttft_s": 5.39, "prefill_tps": 773.85, "decode_tps": 52.95, "accept_rate": 0.7, "accept_len": 3.07}, "longctx@8192": {"n": 3, "prompt_tokens": 8265, "gen_tokens": 512, "ttft_s": 10.89, "prefill_tps": 758.91, "decode_tps": 51.4, "accept_rate": 0.72, "accept_len": 3.13}, "longctx@16384": {"n": 3, "prompt_tokens": 16459, "gen_tokens": 512, "ttft_s": 22.77, "prefill_tps": 722.58, "decode_tps": 44.41, "accept_rate": 0.63, "accept_len": 2.88}, "longctx@32768": {"n": 2, "prompt_tokens": 32841.5, "gen_tokens": 512.0, "ttft_s": 49.12, "prefill_tps": 668.64, "decode_tps": 39.53, "accept_rate": 0.64, "accept_len": 2.9}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 82, "gen_tokens": 512, "ttft_s": 0.24, "prefill_tps": 336.0, "decode_tps": 60.34, "accept_rate": 0.77, "accept_len": 3.31}, "prose@0": {"n": 3, "prompt_tokens": 84, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 333.14, "decode_tps": 47.35, "accept_rate": 0.54, "accept_len": 2.61}, "math@0": {"n": 3, "prompt_tokens": 133, "gen_tokens": 512, "ttft_s": 0.33, "prefill_tps": 405.39, "decode_tps": 63.15, "accept_rate": 0.82, "accept_len": 3.47}, "json@0": {"n": 3, "prompt_tokens": 98, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 391.69, "decode_tps": 68.02, "accept_rate": 0.91, "accept_len": 3.73}, "edit@0": {"n": 3, "prompt_tokens": 2694, "gen_tokens": 512, "ttft_s": 3.67, "prefill_tps": 734.06, "decode_tps": 158.0, "accept_rate": 1.0, "accept_len": 2.69}, "creative@0": {"n": 3, "prompt_tokens": 80, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 311.41, "decode_tps": 39.51, "accept_rate": 0.4, "accept_len": 2.19}}}, "C3": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 202, "gen_tokens": 512, "ttft_s": 0.66, "prefill_tps": 312.61, "decode_tps": 22.85, "accept_rate": null, "accept_len": null}, "longctx@1024": {"n": 3, "prompt_tokens": 1098, "gen_tokens": 512, "ttft_s": 1.89, "prefill_tps": 579.02, "decode_tps": 22.78, "accept_rate": null, "accept_len": null}, "longctx@4096": {"n": 3, "prompt_tokens": 4168, "gen_tokens": 512, "ttft_s": 6.09, "prefill_tps": 683.86, "decode_tps": 22.49, "accept_rate": null, "accept_len": null}, "longctx@8192": {"n": 3, "prompt_tokens": 8268, "gen_tokens": 512, "ttft_s": 11.99, "prefill_tps": 689.55, "decode_tps": 22.0, "accept_rate": null, "accept_len": null}, "longctx@16384": {"n": 3, "prompt_tokens": 16457, "gen_tokens": 512, "ttft_s": 24.8, "prefill_tps": 663.67, "decode_tps": 21.33, "accept_rate": null, "accept_len": null}, "longctx@32768": {"n": 2, "prompt_tokens": 32838.5, "gen_tokens": 512.0, "ttft_s": 54.15, "prefill_tps": 606.55, "decode_tps": 20.02, "accept_rate": null, "accept_len": null}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 512, "ttft_s": 0.57, "prefill_tps": 132.92, "decode_tps": 22.84, "accept_rate": null, "accept_len": null}, "prose@0": {"n": 3, "prompt_tokens": 82, "gen_tokens": 512, "ttft_s": 0.58, "prefill_tps": 142.82, "decode_tps": 22.89, "accept_rate": null, "accept_len": null}, "math@0": {"n": 3, "prompt_tokens": 133, "gen_tokens": 512, "ttft_s": 0.65, "prefill_tps": 203.81, "decode_tps": 22.89, "accept_rate": null, "accept_len": null}, "json@0": {"n": 3, "prompt_tokens": 96, "gen_tokens": 512, "ttft_s": 0.58, "prefill_tps": 164.38, "decode_tps": 22.88, "accept_rate": null, "accept_len": null}, "edit@0": {"n": 3, "prompt_tokens": 2696, "gen_tokens": 512, "ttft_s": 4.11, "prefill_tps": 656.46, "decode_tps": 22.6, "accept_rate": null, "accept_len": null}, "creative@0": {"n": 3, "prompt_tokens": 78, "gen_tokens": 512, "ttft_s": 0.57, "prefill_tps": 137.98, "decode_tps": 22.88, "accept_rate": null, "accept_len": null}}}, "E1": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 203, "gen_tokens": 512, "ttft_s": 0.39, "prefill_tps": 512.79, "decode_tps": 25.14, "accept_rate": null, "accept_len": 1.0}, "longctx@1024": {"n": 3, "prompt_tokens": 1098, "gen_tokens": 512, "ttft_s": 1.52, "prefill_tps": 723.31, "decode_tps": 24.96, "accept_rate": null, "accept_len": 1.0}, "longctx@4096": {"n": 3, "prompt_tokens": 4168, "gen_tokens": 512, "ttft_s": 5.32, "prefill_tps": 783.6, "decode_tps": 24.45, "accept_rate": null, "accept_len": 1.0}, "longctx@8192": {"n": 3, "prompt_tokens": 8268, "gen_tokens": 512, "ttft_s": 13.23, "prefill_tps": 624.73, "decode_tps": 23.92, "accept_rate": null, "accept_len": 1.0}, "longctx@16384": {"n": 3, "prompt_tokens": 16457, "gen_tokens": 512, "ttft_s": 24.84, "prefill_tps": 662.34, "decode_tps": 23.09, "accept_rate": null, "accept_len": 1.0}, "longctx@32768": {"n": 2, "prompt_tokens": 32841.0, "gen_tokens": 512.0, "ttft_s": 50.36, "prefill_tps": 652.1, "decode_tps": 21.67, "accept_rate": null, "accept_len": 1.0}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 80, "gen_tokens": 512, "ttft_s": 0.26, "prefill_tps": 313.41, "decode_tps": 25.03, "accept_rate": null, "accept_len": 1.0}, "prose@0": {"n": 3, "prompt_tokens": 84, "gen_tokens": 512, "ttft_s": 0.24, "prefill_tps": 343.94, "decode_tps": 25.12, "accept_rate": null, "accept_len": 1.0}, "math@0": {"n": 3, "prompt_tokens": 132, "gen_tokens": 512, "ttft_s": 0.32, "prefill_tps": 400.06, "decode_tps": 25.13, "accept_rate": null, "accept_len": 1.0}, "json@0": {"n": 3, "prompt_tokens": 97, "gen_tokens": 512, "ttft_s": 0.24, "prefill_tps": 398.86, "decode_tps": 25.1, "accept_rate": null, "accept_len": 1.0}, "edit@0": {"n": 3, "prompt_tokens": 2693, "gen_tokens": 512, "ttft_s": 4.17, "prefill_tps": 663.97, "decode_tps": 24.67, "accept_rate": null, "accept_len": 1.0}, "creative@0": {"n": 3, "prompt_tokens": 78, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 316.06, "decode_tps": 25.1, "accept_rate": null, "accept_len": 1.0}}}, "E2": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 202, "gen_tokens": 512, "ttft_s": 0.4, "prefill_tps": 503.85, "decode_tps": 46.56, "accept_rate": 0.67, "accept_len": 3.0}, "longctx@1024": {"n": 3, "prompt_tokens": 1099, "gen_tokens": 512, "ttft_s": 1.54, "prefill_tps": 712.57, "decode_tps": 49.53, "accept_rate": 0.75, "accept_len": 3.22}, "longctx@4096": {"n": 3, "prompt_tokens": 4170, "gen_tokens": 512, "ttft_s": 5.38, "prefill_tps": 774.96, "decode_tps": 48.04, "accept_rate": 0.74, "accept_len": 3.2}, "longctx@8192": {"n": 3, "prompt_tokens": 8266, "gen_tokens": 512, "ttft_s": 10.84, "prefill_tps": 762.27, "decode_tps": 46.14, "accept_rate": 0.74, "accept_len": 3.2}, "longctx@16384": {"n": 3, "prompt_tokens": 16456, "gen_tokens": 512, "ttft_s": 22.64, "prefill_tps": 726.87, "decode_tps": 42.63, "accept_rate": 0.74, "accept_len": 3.19}, "longctx@32768": {"n": 2, "prompt_tokens": 32841.0, "gen_tokens": 512.0, "ttft_s": 48.59, "prefill_tps": 675.93, "decode_tps": 38.01, "accept_rate": 0.73, "accept_len": 3.13}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 77, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 311.9, "decode_tps": 51.01, "accept_rate": 0.76, "accept_len": 3.27}, "prose@0": {"n": 3, "prompt_tokens": 87, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 345.5, "decode_tps": 42.66, "accept_rate": 0.58, "accept_len": 2.73}, "math@0": {"n": 3, "prompt_tokens": 135, "gen_tokens": 512, "ttft_s": 0.32, "prefill_tps": 416.6, "decode_tps": 55.23, "accept_rate": 0.85, "accept_len": 3.54}, "json@0": {"n": 3, "prompt_tokens": 95, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 378.92, "decode_tps": 58.25, "accept_rate": 0.92, "accept_len": 3.76}, "edit@0": {"n": 3, "prompt_tokens": 2697, "gen_tokens": 512, "ttft_s": 3.56, "prefill_tps": 758.62, "decode_tps": 150.71, "accept_rate": 1.0, "accept_len": 2.69}, "creative@0": {"n": 3, "prompt_tokens": 78, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 309.03, "decode_tps": 35.86, "accept_rate": 0.44, "accept_len": 2.31}}}, "B1": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 201, "gen_tokens": 512, "ttft_s": 0.42, "prefill_tps": 473.09, "decode_tps": 25.95, "accept_rate": null, "accept_len": 1.0}, "longctx@1024": {"n": 3, "prompt_tokens": 1095, "gen_tokens": 512, "ttft_s": 1.44, "prefill_tps": 757.78, "decode_tps": 25.79, "accept_rate": null, "accept_len": 1.0}, "longctx@4096": {"n": 3, "prompt_tokens": 4171, "gen_tokens": 512, "ttft_s": 5.15, "prefill_tps": 808.54, "decode_tps": 25.37, "accept_rate": null, "accept_len": 1.0}, "longctx@8192": {"n": 3, "prompt_tokens": 8267, "gen_tokens": 512, "ttft_s": 10.27, "prefill_tps": 804.67, "decode_tps": 24.87, "accept_rate": null, "accept_len": 1.0}, "longctx@16384": {"n": 3, "prompt_tokens": 16456, "gen_tokens": 512, "ttft_s": 21.35, "prefill_tps": 771.0, "decode_tps": 24.05, "accept_rate": null, "accept_len": 1.0}, "longctx@32768": {"n": 2, "prompt_tokens": 32841.0, "gen_tokens": 512.0, "ttft_s": 46.3, "prefill_tps": 709.24, "decode_tps": 22.85, "accept_rate": null, "accept_len": 1.0}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 77, "gen_tokens": 512, "ttft_s": 0.28, "prefill_tps": 278.94, "decode_tps": 25.88, "accept_rate": null, "accept_len": 1.0}, "prose@0": {"n": 3, "prompt_tokens": 82, "gen_tokens": 512, "ttft_s": 0.29, "prefill_tps": 285.16, "decode_tps": 25.9, "accept_rate": null, "accept_len": 1.0}, "math@0": {"n": 3, "prompt_tokens": 132, "gen_tokens": 512, "ttft_s": 0.35, "prefill_tps": 372.45, "decode_tps": 25.95, "accept_rate": null, "accept_len": 1.0}, "json@0": {"n": 3, "prompt_tokens": 95, "gen_tokens": 512, "ttft_s": 0.29, "prefill_tps": 321.14, "decode_tps": 25.94, "accept_rate": null, "accept_len": 1.0}, "edit@0": {"n": 3, "prompt_tokens": 2697, "gen_tokens": 512, "ttft_s": 3.38, "prefill_tps": 798.57, "decode_tps": 25.6, "accept_rate": null, "accept_len": 1.0}, "creative@0": {"n": 3, "prompt_tokens": 78, "gen_tokens": 512, "ttft_s": 0.29, "prefill_tps": 273.3, "decode_tps": 25.95, "accept_rate": null, "accept_len": 1.0}}}, "B2": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 201, "gen_tokens": 514, "ttft_s": 0.39, "prefill_tps": 511.14, "decode_tps": 53.09, "accept_rate": null, "accept_len": 2.9}, "longctx@1024": {"n": 3, "prompt_tokens": 1098, "gen_tokens": 515, "ttft_s": 1.4, "prefill_tps": 786.87, "decode_tps": 54.55, "accept_rate": null, "accept_len": 3.05}, "longctx@4096": {"n": 3, "prompt_tokens": 4170, "gen_tokens": 513, "ttft_s": 5.16, "prefill_tps": 808.59, "decode_tps": 49.89, "accept_rate": null, "accept_len": 2.9}, "longctx@8192": {"n": 3, "prompt_tokens": 8266, "gen_tokens": 514, "ttft_s": 10.31, "prefill_tps": 801.18, "decode_tps": 45.66, "accept_rate": null, "accept_len": 2.75}, "longctx@16384": {"n": 3, "prompt_tokens": 16457, "gen_tokens": 512, "ttft_s": 21.46, "prefill_tps": 766.8, "decode_tps": 40.02, "accept_rate": null, "accept_len": 2.55}, "longctx@32768": {"n": 2, "prompt_tokens": 32839.5, "gen_tokens": 514.5, "ttft_s": 46.45, "prefill_tps": 707.01, "decode_tps": 35.93, "accept_rate": null, "accept_len": 2.57}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 80, "gen_tokens": 515, "ttft_s": 0.22, "prefill_tps": 364.67, "decode_tps": 59.73, "accept_rate": null, "accept_len": 3.32}, "prose@0": {"n": 3, "prompt_tokens": 84, "gen_tokens": 513, "ttft_s": 0.26, "prefill_tps": 324.93, "decode_tps": 47.47, "accept_rate": null, "accept_len": 2.61}, "math@0": {"n": 3, "prompt_tokens": 132, "gen_tokens": 514, "ttft_s": 0.32, "prefill_tps": 416.38, "decode_tps": 67.36, "accept_rate": null, "accept_len": 3.67}, "json@0": {"n": 3, "prompt_tokens": 97, "gen_tokens": 515, "ttft_s": 0.25, "prefill_tps": 383.95, "decode_tps": 66.11, "accept_rate": null, "accept_len": 3.6}, "edit@0": {"n": 3, "prompt_tokens": 2696, "gen_tokens": 512, "ttft_s": 3.37, "prefill_tps": 799.83, "decode_tps": 64.73, "accept_rate": null, "accept_len": 3.71}, "creative@0": {"n": 3, "prompt_tokens": 75, "gen_tokens": 513, "ttft_s": 0.22, "prefill_tps": 339.83, "decode_tps": 40.22, "accept_rate": null, "accept_len": 2.21}}}, "B3": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 202, "gen_tokens": 514, "ttft_s": 0.38, "prefill_tps": 537.77, "decode_tps": 59.64, "accept_rate": null, "accept_len": 3.05}, "longctx@1024": {"n": 3, "prompt_tokens": 1099, "gen_tokens": 513, "ttft_s": 1.4, "prefill_tps": 787.74, "decode_tps": 57.5, "accept_rate": null, "accept_len": 3.0}, "longctx@4096": {"n": 3, "prompt_tokens": 4170, "gen_tokens": 512, "ttft_s": 5.2, "prefill_tps": 802.65, "decode_tps": 58.01, "accept_rate": null, "accept_len": 3.13}, "longctx@8192": {"n": 3, "prompt_tokens": 8265, "gen_tokens": 512, "ttft_s": 10.41, "prefill_tps": 794.51, "decode_tps": 50.06, "accept_rate": null, "accept_len": 2.83}, "longctx@16384": {"n": 3, "prompt_tokens": 16457, "gen_tokens": 512, "ttft_s": 21.69, "prefill_tps": 758.58, "decode_tps": 42.86, "accept_rate": null, "accept_len": 2.6}, "longctx@32768": {"n": 2, "prompt_tokens": 32840.5, "gen_tokens": 513.5, "ttft_s": 47.16, "prefill_tps": 696.44, "decode_tps": 37.21, "accept_rate": null, "accept_len": 2.6}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 513, "ttft_s": 0.25, "prefill_tps": 321.93, "decode_tps": 65.79, "accept_rate": null, "accept_len": 3.36}, "prose@0": {"n": 3, "prompt_tokens": 85, "gen_tokens": 512, "ttft_s": 0.26, "prefill_tps": 330.88, "decode_tps": 49.2, "accept_rate": null, "accept_len": 2.57}, "math@0": {"n": 3, "prompt_tokens": 133, "gen_tokens": 513, "ttft_s": 0.32, "prefill_tps": 418.73, "decode_tps": 66.73, "accept_rate": null, "accept_len": 3.47}, "json@0": {"n": 3, "prompt_tokens": 95, "gen_tokens": 514, "ttft_s": 0.25, "prefill_tps": 384.32, "decode_tps": 67.85, "accept_rate": null, "accept_len": 3.47}, "edit@0": {"n": 3, "prompt_tokens": 2697, "gen_tokens": 513, "ttft_s": 3.41, "prefill_tps": 790.17, "decode_tps": 68.91, "accept_rate": null, "accept_len": 3.66}, "creative@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 513, "ttft_s": 0.25, "prefill_tps": 314.68, "decode_tps": 44.13, "accept_rate": null, "accept_len": 2.28}}}, "A1": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 203, "gen_tokens": 512, "ttft_s": 67.01, "prefill_tps": 3.03, "decode_tps": 17.46, "accept_rate": null, "accept_len": null}, "longctx@1024": {"n": 3, "prompt_tokens": 1101, "gen_tokens": 512, "ttft_s": 298.77, "prefill_tps": 3.68, "decode_tps": 17.39, "accept_rate": null, "accept_len": null}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 512, "ttft_s": 34.02, "prefill_tps": 2.32, "decode_tps": 17.49, "accept_rate": null, "accept_len": null}, "prose@0": {"n": 3, "prompt_tokens": 84, "gen_tokens": 512, "ttft_s": 34.16, "prefill_tps": 2.46, "decode_tps": 17.49, "accept_rate": null, "accept_len": null}, "math@0": {"n": 3, "prompt_tokens": 133, "gen_tokens": 512, "ttft_s": 65.77, "prefill_tps": 2.02, "decode_tps": 17.46, "accept_rate": null, "accept_len": null}, "json@0": {"n": 3, "prompt_tokens": 94, "gen_tokens": 512, "ttft_s": 34.35, "prefill_tps": 2.74, "decode_tps": 17.47, "accept_rate": null, "accept_len": null}, "edit@0": {"n": 3, "prompt_tokens": 2697, "gen_tokens": 512, "ttft_s": 728.38, "prefill_tps": 3.7, "decode_tps": 17.26, "accept_rate": null, "accept_len": null}, "creative@0": {"n": 3, "prompt_tokens": 81, "gen_tokens": 512, "ttft_s": 34.06, "prefill_tps": 2.38, "decode_tps": 17.48, "accept_rate": null, "accept_len": null}}}, "A2": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 201, "gen_tokens": 512, "ttft_s": 71.65, "prefill_tps": 2.81, "decode_tps": 8.3, "accept_rate": null, "accept_len": null}, "longctx@1024": {"n": 3, "prompt_tokens": 1097, "gen_tokens": 512, "ttft_s": 321.03, "prefill_tps": 3.42, "decode_tps": 9.02, "accept_rate": null, "accept_len": null}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 81, "gen_tokens": 512, "ttft_s": 36.58, "prefill_tps": 2.21, "decode_tps": 11.52, "accept_rate": null, "accept_len": null}, "prose@0": {"n": 3, "prompt_tokens": 81, "gen_tokens": 512, "ttft_s": 36.28, "prefill_tps": 2.23, "decode_tps": 6.75, "accept_rate": null, "accept_len": null}, "math@0": {"n": 3, "prompt_tokens": 133, "gen_tokens": 512, "ttft_s": 35.78, "prefill_tps": 3.71, "decode_tps": 14.23, "accept_rate": null, "accept_len": null}, "json@0": {"n": 3, "prompt_tokens": 98, "gen_tokens": 512, "ttft_s": 37.19, "prefill_tps": 2.61, "decode_tps": 14.91, "accept_rate": null, "accept_len": null}, "edit@0": {"n": 3, "prompt_tokens": 2695, "gen_tokens": 512, "ttft_s": 746.7, "prefill_tps": 3.61, "decode_tps": 17.64, "accept_rate": null, "accept_len": null}, "creative@0": {"n": 3, "prompt_tokens": 78, "gen_tokens": 512, "ttft_s": 36.34, "prefill_tps": 2.15, "decode_tps": 5.48, "accept_rate": null, "accept_len": null}}}, "C2n": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 201, "gen_tokens": 512, "ttft_s": 0.41, "prefill_tps": 496.49, "decode_tps": 53.53, "accept_rate": 0.65, "accept_len": 2.94}, "longctx@1024": {"n": 3, "prompt_tokens": 1094, "gen_tokens": 512, "ttft_s": 1.53, "prefill_tps": 715.09, "decode_tps": 54.4, "accept_rate": 0.67, "accept_len": 3.02}, "longctx@4096": {"n": 3, "prompt_tokens": 4166, "gen_tokens": 512, "ttft_s": 5.42, "prefill_tps": 768.74, "decode_tps": 52.13, "accept_rate": 0.68, "accept_len": 3.05}, "longctx@8192": {"n": 3, "prompt_tokens": 8268, "gen_tokens": 512, "ttft_s": 10.89, "prefill_tps": 759.53, "decode_tps": 51.05, "accept_rate": 0.7, "accept_len": 3.09}, "longctx@16384": {"n": 3, "prompt_tokens": 16456, "gen_tokens": 512, "ttft_s": 22.71, "prefill_tps": 724.79, "decode_tps": 44.71, "accept_rate": 0.64, "accept_len": 2.91}, "longctx@32768": {"n": 2, "prompt_tokens": 32840.0, "gen_tokens": 512.0, "ttft_s": 50.58, "prefill_tps": 649.97, "decode_tps": 39.16, "accept_rate": 0.63, "accept_len": 2.88}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 80, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 323.13, "decode_tps": 60.01, "accept_rate": 0.77, "accept_len": 3.31}, "prose@0": {"n": 3, "prompt_tokens": 85, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 342.93, "decode_tps": 47.95, "accept_rate": 0.55, "accept_len": 2.64}, "math@0": {"n": 3, "prompt_tokens": 135, "gen_tokens": 512, "ttft_s": 0.33, "prefill_tps": 408.11, "decode_tps": 65.5, "accept_rate": 0.86, "accept_len": 3.59}, "json@0": {"n": 3, "prompt_tokens": 94, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 371.07, "decode_tps": 68.05, "accept_rate": 0.91, "accept_len": 3.73}, "edit@0": {"n": 3, "prompt_tokens": 2696, "gen_tokens": 512, "ttft_s": 3.66, "prefill_tps": 735.92, "decode_tps": 69.44, "accept_rate": 0.99, "accept_len": 3.98}, "creative@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 317.98, "decode_tps": 40.98, "accept_rate": 0.42, "accept_len": 2.26}}}, "E2n": {"s1": {"longctx@128": {"n": 3, "prompt_tokens": 201, "gen_tokens": 512, "ttft_s": 0.4, "prefill_tps": 506.44, "decode_tps": 48.86, "accept_rate": 0.71, "accept_len": 3.14}, "longctx@1024": {"n": 3, "prompt_tokens": 1097, "gen_tokens": 512, "ttft_s": 1.54, "prefill_tps": 713.82, "decode_tps": 53.26, "accept_rate": 0.82, "accept_len": 3.46}, "longctx@4096": {"n": 3, "prompt_tokens": 4171, "gen_tokens": 512, "ttft_s": 5.4, "prefill_tps": 772.4, "decode_tps": 48.19, "accept_rate": 0.74, "accept_len": 3.21}, "longctx@8192": {"n": 3, "prompt_tokens": 8267, "gen_tokens": 512, "ttft_s": 10.81, "prefill_tps": 764.91, "decode_tps": 46.81, "accept_rate": 0.74, "accept_len": 3.23}, "longctx@16384": {"n": 3, "prompt_tokens": 16458, "gen_tokens": 512, "ttft_s": 22.56, "prefill_tps": 729.66, "decode_tps": 44.2, "accept_rate": 0.76, "accept_len": 3.28}, "longctx@32768": {"n": 2, "prompt_tokens": 32841.5, "gen_tokens": 512.0, "ttft_s": 50.31, "prefill_tps": 653.22, "decode_tps": 38.09, "accept_rate": 0.72, "accept_len": 3.16}}, "s2": {"code@0": {"n": 3, "prompt_tokens": 79, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 315.94, "decode_tps": 51.33, "accept_rate": 0.76, "accept_len": 3.27}, "prose@0": {"n": 3, "prompt_tokens": 83, "gen_tokens": 512, "ttft_s": 0.26, "prefill_tps": 324.63, "decode_tps": 42.27, "accept_rate": 0.59, "accept_len": 2.76}, "math@0": {"n": 3, "prompt_tokens": 131, "gen_tokens": 512, "ttft_s": 0.33, "prefill_tps": 397.73, "decode_tps": 55.77, "accept_rate": 0.86, "accept_len": 3.57}, "json@0": {"n": 3, "prompt_tokens": 96, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 376.93, "decode_tps": 58.33, "accept_rate": 0.92, "accept_len": 3.76}, "edit@0": {"n": 3, "prompt_tokens": 2698, "gen_tokens": 512, "ttft_s": 3.66, "prefill_tps": 737.93, "decode_tps": 60.35, "accept_rate": 1.0, "accept_len": 3.99}, "creative@0": {"n": 3, "prompt_tokens": 82, "gen_tokens": 512, "ttft_s": 0.25, "prefill_tps": 321.27, "decode_tps": 36.71, "accept_rate": 0.45, "accept_len": 2.35}}}}, "names": {"A1": "Lithos \u00b7 Qwen3.8 NVFP4 \u00b7 no draft", "A2": "Lithos \u00b7 Qwen3.8 NVFP4 \u00b7 DSpark", "B1": "mlx-dspark \u00b7 Qwen3.8 4bit \u00b7 no draft", "B2": "mlx-dspark \u00b7 Qwen3.8 4bit \u00b7 DFlash2", "B3": "mlx-dspark \u00b7 Qwen3.8 4bit \u00b7 DSpark", "C1": "MTPLX \u00b7 Swift 4bit \u00b7 no MTP", "C2": "MTPLX \u00b7 Swift 4bit \u00b7 MTP d3 + context copy", "C2n": "MTPLX \u00b7 Swift 4bit \u00b7 MTP d3 only", "C3": "mlx-lm (ukisai) \u00b7 Swift 4bit \u00b7 no MTP", "D1": "llama.cpp \u00b7 Swift IQ3_S \u00b7 no MTP", "D2": "llama.cpp \u00b7 Swift IQ3_S \u00b7 MTP", "E1": "MTPLX \u00b7 Swift AX MXFP4 \u00b7 no MTP", "E2": "MTPLX \u00b7 Swift AX MXFP4 \u00b7 MTP d3 + context copy", "E2n": "MTPLX \u00b7 Swift AX MXFP4 \u00b7 MTP d3 only"}};
+const S = D.summary, N = D.names;
+const GROUPS = [
+  ["Lithos Metal 0.1.2 · nvidia Qwen3.8-27B NVFP4", ["A1", "A2"]],
+  ["mlx-dspark 0.20.3 · mlx-community Qwen3.8-27B 4-bit", ["B1", "B2", "B3"]],
+  ["MTPLX 2.12.2 · Swift 1.5 4-bit (ukisai)", ["C1", "C2", "C2n"]],
+  ["mlx-lm 0.32 (ukisai patched) · Swift 1.5 4-bit", ["C3"]],
+  ["llama.cpp b11429 · Swift 1.5 IQ3_S GGUF", ["D1", "D2"]],
+  ["MTPLX 2.12.2 · Swift 1.5 AX MXFP4", ["E1", "E2", "E2n"]],
+].map(([g, ids]) => [g, ids.filter(i => S[i])]).filter(([, ids]) => ids.length);
+const DRAFT = { A1: "no draft", A2: "DSpark draft", B1: "no draft", B2: "DFlash2 draft", B3: "DSpark draft (RedHat)",
+  C1: "no MTP", C2: "MTP + context copy", C2n: "MTP only", C3: "no MTP", D1: "no MTP", D2: "MTP",
+  E1: "no MTP", E2: "MTP + context copy", E2n: "MTP only" };
+const BASE = { A2: "A1", B2: "B1", B3: "B1", C2: "C1", C2n: "C1", D2: "D1", E2: "E1", E2n: "E1" };
+const CTX = [128, 1024, 4096, 8192, 16384, 32768];
+const CTXL = c => c >= 1024 ? (c / 1024) + "k" : String(c);
+const TASKS = ["code", "prose", "math", "json", "edit", "creative"];
+const get = (id, sc, key, m) => (((S[id] || {})[sc] || {})[key] || {})[m];
+const fmt = (v, d = 1) => v == null ? "–" : Number(v).toFixed(d);
+
+function rowHead(id) {
+  return `<td><span class="id">${id}</span><span class="what">${DRAFT[id]}</span></td>`;
+}
+function heat(v, lo, hi) {
+  if (v == null) return "";
+  const t = hi > lo ? (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) : 0;
+  return `background: color-mix(in oklab, var(--heat) ${Math.round(6 + 44 * Math.max(0, Math.min(1, t)))}%, var(--surface))`;
+}
+function heatTable(el, cols, colLabel, val, digits, invert) {
+  const all = []; GROUPS.forEach(([, ids]) => ids.forEach(id => cols.forEach(c => { const v = val(id, c); if (v != null) all.push(v); })));
+  const lo = Math.min(...all), hi = Math.max(...all);
+  let h = `<thead><tr><th>Configuration</th>${cols.map(c => `<th>${colLabel(c)}</th>`).join("")}</tr></thead><tbody>`;
+  GROUPS.forEach(([g, ids]) => {
+    h += `<tr class="group"><td colspan="${cols.length + 1}">${g}</td></tr>`;
+    ids.forEach(id => {
+      h += `<tr>${rowHead(id)}${cols.map(c => {
+        const v = val(id, c);
+        const st = v == null ? "" : invert ? heat(hi + lo - v, lo, hi) : heat(v, lo, hi);
+        return `<td class="${v == null ? "na" : ""}" style="${st}">${fmt(v, digits)}</td>`;
+      }).join("")}</tr>`;
+    });
+  });
+  el.innerHTML = h + "</tbody>";
+}
+heatTable(document.getElementById("t-decode"), CTX, CTXL, (id, c) => get(id, "s1", `longctx@${c}`, "decode_tps"), 1);
+heatTable(document.getElementById("t-prefill"), CTX, CTXL, (id, c) => get(id, "s1", `longctx@${c}`, "prefill_tps"), 0);
+heatTable(document.getElementById("t-ttft"), CTX, CTXL, (id, c) => get(id, "s1", `longctx@${c}`, "ttft_s"), 1, true);
+heatTable(document.getElementById("t-tasks"), TASKS, t => t, (id, t) => get(id, "s2", `${t}@0`, "decode_tps"), 1);
+
+(function speedup() {
+  const el = document.getElementById("t-speedup");
+  let h = `<thead><tr><th>Configuration</th>${TASKS.map(t => `<th>${t}</th>`).join("")}<th>32k ctx</th></tr></thead><tbody>`;
+  GROUPS.forEach(([g, ids]) => {
+    const rows = ids.filter(id => BASE[id]);
+    if (!rows.length) return;
+    h += `<tr class="group"><td colspan="${TASKS.length + 2}">${g}</td></tr>`;
+    rows.forEach(id => {
+      const cells = TASKS.map(t => [get(id, "s2", `${t}@0`, "decode_tps"), get(BASE[id], "s2", `${t}@0`, "decode_tps")]);
+      cells.push([get(id, "s1", "longctx@32768", "decode_tps"), get(BASE[id], "s1", "longctx@32768", "decode_tps")]);
+      h += `<tr>${rowHead(id)}${cells.map(([a, b]) => {
+        if (a == null || b == null) return `<td class="na">–</td>`;
+        const r = a / b, t = Math.min(1, Math.abs(Math.log2(r)) / 2);
+        const col = r >= 1 ? "var(--heat)" : "var(--neg)";
+        return `<td style="background: color-mix(in oklab, ${col} ${Math.round(6 + 44 * t)}%, var(--surface))">${r.toFixed(2)}×</td>`;
+      }).join("")}</tr>`;
+    });
+  });
+  el.innerHTML = h + "</tbody>";
+})();
+
+(function accept() {
+  const el = document.getElementById("t-accept");
+  let h = `<thead><tr><th>Configuration</th>${TASKS.map(t => `<th>${t}</th>`).join("")}</tr></thead><tbody>`;
+  GROUPS.forEach(([g, ids]) => {
+    const rows = ids.filter(id => TASKS.some(t => get(id, "s2", `${t}@0`, "accept_rate") != null || (get(id, "s2", `${t}@0`, "accept_len") || 1) > 1));
+    if (!rows.length) return;
+    h += `<tr class="group"><td colspan="${TASKS.length + 1}">${g}</td></tr>`;
+    rows.forEach(id => {
+      h += `<tr>${rowHead(id)}${TASKS.map(t => {
+        const r = get(id, "s2", `${t}@0`, "accept_rate"), l = get(id, "s2", `${t}@0`, "accept_len");
+        return `<td>${r != null ? Math.round(r * 100) + "%" : l != null ? l.toFixed(2) + " tok" : "–"}</td>`;
+      }).join("")}</tr>`;
+    });
+  });
+  el.innerHTML = h + "</tbody>";
+})();
+
+function lineChart(host, legendEl, series, metric, yLabel) {
+  const W = 880, H = 340, m = { l: 52, r: 24, t: 14, b: 40 };
+  const xs = CTX.map((c, i) => m.l + i * (W - m.l - m.r) / (CTX.length - 1));
+  const vals = series.flatMap(s => CTX.map(c => get(s.id, "s1", `longctx@${c}`, metric)).filter(v => v != null));
+  const step = metric === "prefill_tps" ? 200 : 10;
+  const yMax = Math.ceil(Math.max(...vals) * 1.08 / step) * step;
+  const y = v => m.t + (H - m.t - m.b) * (1 - v / yMax);
+  let g = "";
+  for (let v = 0; v <= yMax; v += step) {
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(${v === 0 ? "--axis" : "--rule"})" stroke-width="1"/>`;
+    g += `<text x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  }
+  xs.forEach((x, i) => g += `<text x="${x}" y="${H - m.b + 18}" text-anchor="middle">${CTXL(CTX[i])}</text>`);
+  g += `<text x="${m.l}" y="${H - 4}" text-anchor="start">context tokens →</text>`;
+  g += `<text transform="translate(12 ${m.t + (H - m.t - m.b) / 2}) rotate(-90)" text-anchor="middle">${yLabel}</text>`;
+  series.forEach(s => {
+    const pts = CTX.map((c, i) => [xs[i], get(s.id, "s1", `longctx@${c}`, metric)]).filter(p => p[1] != null);
+    g += `<polyline fill="none" stroke="var(${s.c})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${pts.map(p => `${p[0]},${y(p[1])}`).join(" ")}"/>`;
+    pts.forEach(p => g += `<circle cx="${p[0]}" cy="${y(p[1])}" r="4" fill="var(${s.c})" stroke="var(--surface)" stroke-width="2"/>`);
+  });
+  g += `<line id="cross" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--axis)" stroke-width="1" visibility="hidden"/>`;
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${yLabel} by context length">${g}<rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"/></svg><div class="tip" hidden></div>`;
+  legendEl.innerHTML = series.map(s => `<span><i style="background: var(${s.c})"></i>${s.id} · ${s.label}</span>`).join("");
+  const svg = host.querySelector("svg"), tip = host.querySelector(".tip"), cross = host.querySelector("#cross");
+  const show = (evt) => {
+    const r = svg.getBoundingClientRect(), sx = (evt.clientX - r.left) * W / r.width;
+    let i = 0; xs.forEach((x, k) => { if (Math.abs(x - sx) < Math.abs(xs[i] - sx)) i = k; });
+    cross.setAttribute("x1", xs[i]); cross.setAttribute("x2", xs[i]); cross.setAttribute("visibility", "visible");
+    const rows = series.map(s => [s, get(s.id, "s1", `longctx@${CTX[i]}`, metric)]).filter(([, v]) => v != null).sort((a, b) => b[1] - a[1]);
+    tip.innerHTML = `<div class="eyebrow">${CTXL(CTX[i])} context</div>` + rows.map(([s, v]) => `<div class="row" style="--c: var(${s.c})"><span>${s.id} ${s.label}</span><span class="num">${v.toFixed(metric === "prefill_tps" ? 0 : 1)}</span></div>`).join("");
+    tip.hidden = false;
+    const px = xs[i] * r.width / W, hostW = host.clientWidth;
+    tip.style.left = Math.min(Math.max(0, px + 14), hostW - tip.offsetWidth - 4) + "px";
+    tip.style.top = "8px";
+  };
+  svg.addEventListener("pointermove", show);
+  svg.addEventListener("pointerleave", () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); });
+}
+lineChart(document.getElementById("chart-decode"), document.getElementById("leg-decode"), [
+  { id: "B3", c: "--s1", label: "mlx-dspark + DSpark (Qwen)" },
+  { id: "B2", c: "--s2", label: "mlx-dspark + DFlash2 (Qwen)" },
+  { id: "C2n", c: "--s3", label: "MTPLX + MTP (Swift 4-bit)" },
+  { id: "D2", c: "--s4", label: "llama.cpp + MTP (Swift IQ3_S)" },
+  { id: "D1", c: "--s5", label: "llama.cpp, no MTP (Swift IQ3_S)" },
+  { id: "B1", c: "--s6", label: "mlx-dspark, no draft (Qwen)" },
+].filter(s => S[s.id]), "decode_tps", "decode tok/s");
+lineChart(document.getElementById("chart-prefill"), document.getElementById("leg-prefill"), [
+  { id: "B1", c: "--s1", label: "mlx-dspark (Qwen 4-bit)" },
+  { id: "E1", c: "--s2", label: "MTPLX (Swift AX MXFP4)" },
+  { id: "C1", c: "--s3", label: "MTPLX (Swift 4-bit)" },
+  { id: "C3", c: "--s4", label: "mlx-lm (Swift 4-bit)" },
+  { id: "D1", c: "--s5", label: "llama.cpp (Swift IQ3_S)" },
+].filter(s => S[s.id]), "prefill_tps", "prefill tok/s");
+</script>

@@ -1,0 +1,83 @@
+[
+  {
+    "prompt": "Write a complete, production-quality Python module `kvstore.py` implementing a persistent key-value store. Requirements:\n- string keys, JSON-serializable values; get/put/delete/scan(prefix) API\n- durability through a write-ahead log with fsync and crash recovery on startup\n- periodic compaction of the log into a snapshot file, done atomically\n- an in-memory LRU read cache with a configurable size\n- optional per-key TTL expiry\n- thread safety for concurrent readers and writers\n- a small argparse CLI (get, put, delete, scan, compact)\n- full type hints and docstrings\nAfter the module, write a thorough pytest test suite covering every feature, including crash recovery and concurrency. Output the complete code.",
+    "ar": {
+      "tokens": 8192,
+      "tok_s": 23.916603585796473
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 8192,
+      "tok_s": 97.17999727859174,
+      "diverges_at": 17,
+      "steps": 1268,
+      "decode_s": 84.28689266699985,
+      "prefill_s": 0.30840470799921604,
+      "tokens_per_step": 6.459779179810726,
+      "mean_rows": 1.0,
+      "mean_nodes": 9.593059936908517,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 10.593059936908517,
+      "depth_hist": {
+        "5": 12,
+        "6": 45,
+        "7": 470,
+        "8": 90,
+        "10": 51,
+        "11": 207,
+        "12": 175,
+        "13": 137,
+        "14": 59,
+        "15": 22
+      },
+      "draft_s": 0.0,
+      "verify_s": 84.28689266699985,
+      "spec_hit_rate": null
+    },
+    "fork d15 +0x0 s4 [general_vocab 64k]": {
+      "tokens": 8192,
+      "tok_s": 96.32161985289244,
+      "diverges_at": 588,
+      "steps": 1388,
+      "decode_s": 85.03802170800009,
+      "prefill_s": 0.31363674999920477,
+      "tokens_per_step": 5.901296829971182,
+      "mean_rows": 1.0,
+      "mean_nodes": 8.969740634005763,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 9.969740634005763,
+      "draft_s": 0.0,
+      "verify_s": 85.03802170800009,
+      "alt_win_rate": 0.0,
+      "sib_win_rate": 0.04106628242074928,
+      "shape_hist": {
+        "7": 989,
+        "12/s3": 237,
+        "11/s4": 61,
+        "6/s1": 41
+      }
+    },
+    "fork d15 +2x4 s4 [general_vocab 64k]": {
+      "tokens": 8192,
+      "tok_s": 102.09498462859506,
+      "diverges_at": 622,
+      "steps": 1268,
+      "decode_s": 80.22921037500055,
+      "prefill_s": 0.31363674999920477,
+      "tokens_per_step": 6.46608832807571,
+      "mean_rows": 1.2113564668769716,
+      "mean_nodes": 10.818611987381704,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 11.818611987381704,
+      "draft_s": 0.0,
+      "verify_s": 80.22921037500055,
+      "alt_win_rate": 0.04022082018927445,
+      "sib_win_rate": 0.07334384858044164,
+      "shape_hist": {
+        "7+0+0": 646,
+        "11+0+0/s4": 189,
+        "12+0+0/s3": 158,
+        "13+0+0/s2": 54
+      }
+    }
+  }
+]

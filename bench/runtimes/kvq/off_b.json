@@ -1,0 +1,110 @@
+{
+ "short-code": {
+  "text": "```python\n\"\"\"\nThread-safe LRU cache with TTL expiry and size limits.\n\nThis module provides a `ThreadSafeLRUCache` class that implements a Least Recently Used (LRU)\ncache with the following features:\n- Thread safety via `threading.RLock`\n- Time-to-live (TTL) based expiration\n- Maximum size limit with LRU eviction\n- `get`, `put`, and `delete` operations\n- Optional per-key TTL override\n\"\"\"\n\nimport threading\nimport time\nfrom collections import OrderedDict\nfrom typing import Any, Hashable, Optional\n\n\nclass ThreadSafeLRUCache:\n    \"\"\"\n    A thread-safe LRU cache with TTL expiry and size limits.\n\n    The cache stores key-value pairs and evicts entries based on:\n    1. Time-to-live (TTL) expiration\n    2. Least Recently Used (LRU) policy when the cache exceeds its maximum size\n\n    Attributes:\n        max_size (int): Maximum number of items the cache can hold.\n        default_ttl (float): Default time-to-live in seconds for entries.\n        _cache (OrderedDict): Internal storage mapping keys to (value, expiry_time) tuples.\n        _lock (threading.RLock): Reentrant lock for thread safety.\n    \"\"\"\n\n    def __init__(self, max_size: int = 128, default_ttl: Optional[float] = None) -> None:\n        \"\"\"\n        Initialize the LRU cache.\n\n        Args:\n            max_size: Maximum number of items the cache can hold. Must be positive.\n            default_ttl: Default time-to-live in seconds. If None, entries do not expire by TTL.\n\n        Raises:\n            ValueError: If max_size is not a positive integer.\n        \"\"\"\n        if not isinstance(max_size, int) or max_size <= 0:\n            raise ValueError(\"max",
+  "usage": {
+   "prompt_tokens": 43,
+   "completion_tokens": 400,
+   "total_tokens": 443,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 7.4
+ },
+ "short-math": {
+  "text": "Here is the step-by-step solution to the problem.\n\n### Part 1: Step-by-Step Solution\n\n**1. Determine the rates of each pipe**\n\nFirst, we calculate the rate of work for each pipe in terms of \"fraction of the tank per hour.\"\n\n*   **Pipe A (Fills):** Fills the tank in 6 hours.\n    $$Rate_A = \\frac{1}{6} \\text{ tank/hour}$$\n*   **Pipe B (Fills):** Fills the tank in 9 hours.\n    $$Rate_B = \\frac{1}{9} \\text{ tank/hour}$$\n*   **Drain (Empties):** Empties the tank in 12 hours.\n    $$Rate_D = -\\frac{1}{12} \\text{ tank/hour}$$ (Negative because it removes water)\n\n**2. Analyze Phase 1: First 2 hours (All three open)**\n\nThe tank starts a quarter full ($\\frac{1}{4}$). All three pipes are open for the first 2 hours.\n\n*   **Net Rate (Phase 1):**\n    $$Rate_{net1} = Rate_A + Rate_B + Rate_D$$\n    $$Rate_{net1} = \\frac{1}{6} + \\frac{1}{9} - \\frac{1}{12}$$\n\n    To add these fractions, find the Least Common Multiple (LCM) of 6, 9, and 12, which is 36.\n    $$\\frac{1}{6} = \\frac{6}{36}$$\n    $$\\frac{1}{9} = \\frac{4}{36}$$\n    $$\\frac{1}{12} = \\frac{3}{36}$$\n\n    $$Rate_{net1",
+  "usage": {
+   "prompt_tokens": 96,
+   "completion_tokens": 400,
+   "total_tokens": 496,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 6.6
+ },
+ "short-prose": {
+  "text": "TCP congestion control is a critical mechanism designed to prevent network overload by dynamically adjusting the amount of data a sender transmits based on perceived network conditions. The process begins with **Slow Start**, which is used when a connection is first established or after a timeout. In this phase, the sender starts with a small window size, typically one Maximum Segment Size (MSS), and doubles the congestion window (cwnd) for every round-trip time (RTT) that passes without packet loss. This exponential growth allows the sender to quickly probe the available bandwidth. The phase continues until the cwnd reaches a threshold called the slow start threshold (ssthresh), which is usually set to half of the cwnd at the moment loss was detected in the previous cycle.\n\nOnce the cwnd exceeds the ssthresh, the algorithm transitions to **Congestion Avoidance**. In this phase, the growth of the cwnd becomes linear rather than exponential. For every RTT, the cwnd increases by one MSS. This gradual increase helps the sender maintain a stable throughput while carefully probing for additional available bandwidth without causing significant congestion. The goal here is to find the maximum sustainable throughput for the path. If a packet loss is detected during this phase, the ssthresh is reduced to half of the current cwnd, and the cwnd is reset to the new ssthresh (in traditional TCP) or handled via fast recovery, signaling that the network is congested and the sender must back off.\n\nWhen packet loss is detected, TCP employs **Fast Retransmit** and **Fast Recovery** mechanisms to react more intelligently than simply waiting for a timeout. Fast Retransmit is triggered when the sender receives three duplicate acknowledgments (ACKs) for the same segment. This indicates that a packet was likely lost, as the subsequent packets arrived out of order. Upon receiving these duplicate ACKs, the sender immediately retransmits the missing packet without waiting for the retransmission timer to expire.",
+  "usage": {
+   "prompt_tokens": 47,
+   "completion_tokens": 400,
+   "total_tokens": 447,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 9.1
+ },
+ "summary-4k": {
+  "text": "Here is a summary of the provided code modules, followed by pytest unit tests for three specific functions.\n\n### Module Summaries\n\n1.  **`__future__.py`**\n    *   **Purpose:** Defines the infrastructure for \"future statements\" in Python (e.g., `from __future__ import division`).\n    *   **Key Components:**\n        *   `_Feature` class: Stores metadata about a language feature, including the version it was introduced (`optionalRelease`), the version it became mandatory (`mandatoryRelease`), and the compiler flag (`compiler_flag`).\n        *   Constants: Defines `CO_xxx` flags corresponding to CPython compiler flags.\n        *   Feature Instances: Creates instances for features like `nested_scopes`, `generators`, `division`, `print_function`, etc.\n        *   `all_feature_names`: A list of all available feature names.\n\n2.  **`__hello__.py`**\n    *   **Purpose:** A simple test script, likely used for verifying interpreter startup, encoding handling (UTF-8), and basic execution.\n    *   **Key Components:**\n        *   Classes `TestFrozenUtf8_1`, `TestFrozenUtf8_2`, `TestFrozenUtf8_4`: Contain docstrings with Unicode characters (\u00b6, \u03c0, \ud83d\ude00) to test UTF-8 handling.\n        *   `main()`: Prints \"Hello world!\".\n        *   Entry point: Executes `main()` if run as a script.\n\n3.  **`_aix_support.py`**\n    *   **Purpose:** Provides helper functions to determine AIX-specific platform tags for binary compatibility (PEP 425).\n    *   **Key Functions:**\n        *   `_read_cmd_output`: Executes a shell command and captures output (used during bootstrap when `subprocess` might not be available).\n        *   `_aix",
+  "usage": {
+   "prompt_tokens": 4133,
+   "completion_tokens": 400,
+   "total_tokens": 4533,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 13.5
+ },
+ "summary-16k": {
+  "text": "Here is a summary of the provided modules followed by pytest unit tests for three selected functions.\n\n### Module Summaries\n\n1.  **`__future__.py`**:\n    This module defines the infrastructure for \"future statements\" in Python. It contains a list of all available future features (e.g., `division`, `print_function`, `annotations`) and a `_Feature` class that tracks when a feature was introduced (`optionalRelease`), when it became mandatory (`mandatoryRelease`), and the compiler flag associated with it. It allows Python code to opt-in to new language features before they become the default.\n\n2.  **`__hello__.py`**:\n    A simple script that defines a `main` function printing \"Hello world!\" and executes it if the script is run directly. It also defines several test classes with Unicode docstrings, likely used for testing UTF-8 handling in frozen modules.\n\n3.  **`_aix_support.py`**:\n    Provides utility functions for AIX (IBM's Unix operating system) platform support. Key functions include:\n    *   `_aix_tag`: Constructs a PEP 425 platform tag string (e.g., `aix-6107-1415-64`) based on version, release, technology level, build date, and bit width.\n    *   `_aix_vrtl`: Parses a VRMF (Version.Release.Maintenance.Fix) string into a list of integers.\n    *   `aix_platform`: Determines the current AIX platform tag by querying system information.\n    *   `aix_buildtag`: Determines the platform tag of the system Python was built on.\n\n4.  **`_collections_abc.py`**:\n    Defines the Abstract Base Classes (ABCs) for collections, such as `Iterable`, `Iterator`, `Mapping`, `MutableMapping`, `Sequence`, `MutableSequence`, `Set`, and `Mutable",
+  "usage": {
+   "prompt_tokens": 16420,
+   "completion_tokens": 400,
+   "total_tokens": 16820,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 32.9
+ },
+ "summary-29k": {
+  "text": "Here is a summary of the provided Python modules, followed by unit tests for three selected functions.\n\n### Module Summaries\n\n1.  **`__future__.py`**:\n    This module defines the infrastructure for \"future statements\" in Python. It contains a list of all available future features (e.g., `division`, `print_function`, `annotations`) and their corresponding compiler flags. It defines the `_Feature` class, which tracks when a feature was introduced (`optionalRelease`) and when it became mandatory (`mandatoryRelease`). This allows the Python compiler to know which syntax changes are enabled for a specific module.\n\n2.  **`__hello__.py`**:\n    A simple test script that prints \"Hello world!\". It also defines several classes with docstrings containing Unicode characters (\u00b6, \u03c0, \ud83d\ude00) to test UTF-8 handling in frozen modules.\n\n3.  **`_aix_support.py`**:\n    Provides helper functions for AIX (IBM's Unix) platform support. It includes logic to determine the AIX platform tag (used for binary compatibility/PEP 425) by querying system commands like `lslpp` to get the version, release, technology level, and build date. It handles both 32-bit and 64-bit environments.\n\n4.  **`_collections_abc.py`**:\n    Defines the Abstract Base Classes (ABCs) for collections (e.g., `Iterable`, `Mapping`, `Sequence`, `Set`). It implements the `ABCMeta` metaclass logic (via imports from `abc` or `_py_abc`) to allow virtual subclass registration. It provides concrete implementations for common methods (like `get`, `pop`, `update` for mappings) based on abstract methods, ensuring that any class inheriting from these ABCs behaves consistently. It also defines specific view classes like `KeysView`, `ItemsView`, and `ValuesView`.\n\n5.",
+  "usage": {
+   "prompt_tokens": 30037,
+   "completion_tokens": 400,
+   "total_tokens": 30437,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 56.4
+ },
+ "recall-30k-10%": {
+  "text": "7419-QX",
+  "usage": {
+   "prompt_tokens": 30052,
+   "completion_tokens": 7,
+   "total_tokens": 30059,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 46.6
+ },
+ "recall-30k-50%": {
+  "text": "2086-LV",
+  "usage": {
+   "prompt_tokens": 30050,
+   "completion_tokens": 7,
+   "total_tokens": 30057,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 46.4
+ },
+ "recall-30k-90%": {
+  "text": "5532-HB",
+  "usage": {
+   "prompt_tokens": 30052,
+   "completion_tokens": 7,
+   "total_tokens": 30059,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "s": 46.5
+ }
+}

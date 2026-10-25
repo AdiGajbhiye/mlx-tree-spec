@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlx-tree-spec"
+version = "0.1.0"
+description = "Tree-speculative decoding with continuous batching for Qwen3.8-27B on Apple Silicon (MLX + MTPLX)"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Aditya Gajbhiye" }]
+requires-python = ">=3.11"
+keywords = ["mlx", "apple-silicon", "speculative-decoding", "qwen", "llm", "inference"]
+classifiers = [
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# tree_flash patches MTPLX's kernel source by exact match and the server uses its
+# runtime internals, so MTPLX and MLX are pinned to the versions this was measured on.
+dependencies = [
+    "mtplx==2.12.2",
+    "mlx==0.32.2",
+    "mlx-lm>=0.31,<0.32",
+    "numpy>=2",
+    "huggingface-hub>=0.36",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[project.scripts]
+mlx-tree-spec-server = "mlx_tree_spec.server:main"
+
+[project.urls]
+Repository = "https://github.com/AdiGajbhiye/mlx-tree-spec"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlx_tree_spec"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["model: loads the 27B model (needs ~20 GB free unified memory and an M5-class GPU)"]
+
+[tool.ruff]
+line-length = 140

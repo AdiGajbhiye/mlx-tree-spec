@@ -1,0 +1,3469 @@
+# ===== file: mlx_lm/models/cache.py =====
+# Copyright © 2023-2024 Apple Inc.
+
+import copy
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import mlx.core as mx
+import mlx.nn as nn
+from mlx.utils import tree_flatten, tree_map, tree_reduce, tree_unflatten
+
+from .base import create_causal_mask
+
+
+def make_prompt_cache(
+    model: nn.Module,
+    max_kv_size: Optional[int] = None,
+) -> List[Any]:
+    """
+    Construct the model's cache for use in generation.
+
+    This function will defer the cache construction to the model if it has a
+    ``make_cache`` method, otherwise it will make a default KV cache.
+
+    Args:
+        model (nn.Module): The language model.
+        max_kv_size (Optional[int]): If provided and the model does not have a
+            ``make_cache`` method, a ``RotatingKVCache`` is used with a maximum
+            size of ``max_kv_size``
+    """
+    if hasattr(model, "make_cache"):
+        return model.make_cache()
+
+    num_layers = len(model.layers)
+    if max_kv_size is not None:
+        return [
+            RotatingKVCache(max_size=max_kv_size, keep=4) for _ in range(num_layers)
+        ]
+    else:
+        return [KVCache() for _ in range(num_layers)]
+
+
+def save_prompt_cache(file_name: str, cache: List[Any], metadata: Dict[str, str] = {}):
+    """
+    Save a pre-computed prompt cache to a file.
+
+    Args:
+        file_name (str): The ``.safetensors`` file name.
+        cache (List[Any]): The model state.
+        metadata (Dict[str, str]): Optional metadata to save along with model
+            state.
+    """
+    cache_data = [c.state for c in cache]
+    cache_info = [c.meta_state for c in cache]
+    cache_data = dict(tree_flatten(cache_data))
+    cache_classes = [type(c).__name__ for c in cache]
+    cache_metadata = [cache_info, metadata, cache_classes]
+    cache_metadata = dict(tree_flatten(cache_metadata))
+    mx.save_safetensors(file_name, cache_data, cache_metadata)
+
+
+def load_prompt_cache(file_name, return_metadata=False):
+    """
+    Load a prompt cache from a file.
+
+    Args:
+        file_name (str): The ``.safetensors`` file name.
+        return_metadata (bool): Whether or not to return metadata.
+            Default: ``False``.
+
+    Returns:
+        List[Any] or Tuple[List[Any], Dict[str, str]]: The prompt cache and
+            the metadata if requested.
+    """
+    arrays, cache_metadata = mx.load(file_name, return_metadata=True)
+    arrays = tree_unflatten(list(arrays.items()))
+    cache_metadata = tree_unflatten(list(cache_metadata.items()))
+    info, metadata, classes = cache_metadata
+    cache = [
+        globals()[c].from_state(state, meta_state)
+        for c, state, meta_state in zip(classes, arrays, info)
+    ]
+    if return_metadata:
+        return cache, metadata
+    return cache
+
+
+def can_trim_prompt_cache(cache: List[Any]) -> bool:
+    """
+    Check if model's cache can be trimmed.
+    """
+    return all(c.is_trimmable() for c in cache)
+
+
+def trim_prompt_cache(cache: List[Any], num_tokens: int) -> List[Any]:
+    """
+    Trim the model's cache by the given number of tokens.
+
+    This function will trim the cache if possible (in-place) and return the
+    number of tokens that were trimmed.
+
+    Args:
+        cache (List[Any]): The model's cache.
+        num_tokens (int): The number of tokens to trim.
+
+    Returns:
+        (int): The number of tokens that were trimmed.
+    """
+    if not can_trim_prompt_cache(cache) or len(cache) == 0:
+        return 0
+    return [c.trim(num_tokens) for c in cache][0]
+
+
+def create_attention_mask(
+    N: int, offset: int, return_array: bool, window_size: Optional[int]
+):
+    if window_size is not None:
+        return create_causal_mask(N, offset, window_size=window_size)
+    elif N == 1:
+        return None
+    elif return_array:
+        return create_causal_mask(N, offset, window_size=window_size)
+    else:
+        return "causal"
+
+
+class _BaseCache:
+    @property
+    def state(self):
+        return []
+
+    @state.setter
+    def state(self, v):
+        if v is not None and v:
+            raise ValueError("This cache has no state but a state was set.")
+
+    @property
+    def meta_state(self):
+        return ""
+
+    @meta_state.setter
+    def meta_state(self, v):
+        if v is not None and v:
+            raise ValueError("This cache has no meta_state but a meta_state was set.")
+
+    def is_trimmable(self):
+        return False
+
+    def size(self):
+        """
+        Return the size (i.e. sequence length) of the cache.
+
+        Not every cache is required to implement this, in which case the size
+        will always be 0 (though the cache may not be empty).
+        """
+        return 0
+
+    @property
+    def nbytes(self):
+        """Return the size of this cache in bytes"""
+        raise NotImplementedError("Cache sub-class must implement nbytes")
+
+    def empty(self):
+        """
+        Return if the cache is empty or not.
+        """
+        raise NotImplementedError("Cache sub-class must implement this.")
+
+    @classmethod
+    def from_state(cls, state, meta_state):
+        # Create an instance of cls without calling __init__
+        obj = cls.__new__(cls)
+        obj.state = state
+        obj.meta_state = meta_state
+        return obj
+
+
+class ConcatenateKVCache(_BaseCache):
+    """ConcatenateKVCache the simplest KV cache implementation.
+
+    Can be used as a mock KV cache or when large blocks are being processed at
+    a time in which case KVCache isn't necessarily faster. Consider using the
+    KVCache with a larger step size before using this cache.
+    """
+
+    def __init__(self):
+        self.keys = None
+        self.values = None
+        self.offset = 0
+
+    def update_and_fetch(self, keys, values):
+        if self.keys is None:
+            self.keys = keys
+            self.values = values
+        else:
+            self.keys = mx.concatenate([self.keys, keys], axis=-2)
+            self.values = mx.concatenate([self.values, values], axis=-2)
+        self.offset = self.keys.shape[-2]
+
+        return self.keys, self.values
+
+    @property
+    def state(self):
+        return self.keys, self.values
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values = v
+        self.offset = self.keys.shape[-2]
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        n = min(self.offset, n)
+        self.offset -= n
+        return n
+
+    def make_mask(self, *args, **kwargs):
+        return create_attention_mask(*args, offset=self.offset, **kwargs)
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        if self.keys is None:
+            return 0
+        return self.keys.nbytes + self.values.nbytes
+
+
+class QuantizedKVCache(_BaseCache):
+    step = 256
+
+    def __init__(self, group_size: int = 64, bits: int = 8):
+        self.keys = None
+        self.values = None
+        self.offset = 0
+        self.group_size = group_size
+        self.bits = bits
+
+    def update_and_fetch(self, keys, values):
+        B, n_kv_heads, num_steps, k_head_dim = keys.shape
+        v_head_dim = values.shape[-1]
+        prev = self.offset
+
+        if self.keys is None or (prev + num_steps) > self.keys[0].shape[-2]:
+            el_per_int = 8 * mx.uint32.size // self.bits
+            new_steps = (self.step + num_steps - 1) // self.step * self.step
+            shape = (B, n_kv_heads, new_steps)
+
+            def init_quant(dim):
+                return (
+                    mx.zeros((*shape, dim // el_per_int), dtype=mx.uint32),
+                    mx.zeros((*shape, dim // self.group_size), dtype=keys.dtype),
+                    mx.zeros((*shape, dim // self.group_size), dtype=keys.dtype),
+                )
+
+            def expand_quant(x):
+                new_x = mx.zeros((*shape, x.shape[-1]), dtype=x.dtype)
+                return mx.concatenate([x, new_x], axis=-2)
+
+            if self.keys is not None:
+                if prev % self.step != 0:
+                    self.keys, self.values = tree_map(
+                        lambda x: x[..., :prev, :], (self.keys, self.values)
+                    )
+
+                self.keys, self.values = tree_map(
+                    expand_quant, (self.keys, self.values)
+                )
+            else:
+                self.keys, self.values = init_quant(k_head_dim), init_quant(v_head_dim)
+
+        self.offset += num_steps
+
+        keys = mx.quantize(keys, group_size=self.group_size, bits=self.bits)
+        values = mx.quantize(values, group_size=self.group_size, bits=self.bits)
+        for i in range(len(self.keys)):
+            self.keys[i][..., prev : self.offset, :] = keys[i]
+            self.values[i][..., prev : self.offset, :] = values[i]
+
+        return tree_map(lambda x: x[..., : self.offset, :], (self.keys, self.values))
+
+    @property
+    def state(self):
+        if self.offset == self.keys[0].shape[2]:
+            return self.keys, self.values
+        else:
+            return tree_map(
+                lambda x: x[..., : self.offset, :], (self.keys, self.values)
+            )
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values = v
+
+    @property
+    def meta_state(self):
+        return tuple(map(str, (self.offset, self.group_size, self.bits)))
+
+    @meta_state.setter
+    def meta_state(self, v):
+        self.offset, self.group_size, self.bits = map(int, v)
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        n = min(self.offset, n)
+        self.offset -= n
+        return n
+
+    def make_mask(self, *args, **kwargs):
+        return create_attention_mask(*args, offset=self.offset, **kwargs)
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        return tree_reduce(lambda a, x: a + x.nbytes, (self.keys, self.values), 0)
+
+
+class KVCache(_BaseCache):
+    step = 256
+
+    def __init__(self):
+        self.keys = None
+        self.values = None
+        self.offset = 0
+
+    def update_and_fetch(self, keys, values):
+        prev = self.offset
+        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:
+            B, n_kv_heads, _, k_head_dim = keys.shape
+            v_head_dim = values.shape[3]
+            n_steps = (self.step + keys.shape[2] - 1) // self.step
+            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
+            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                if prev % self.step != 0:
+                    self.keys = self.keys[..., :prev, :]
+                    self.values = self.values[..., :prev, :]
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+
+        self.offset += keys.shape[2]
+        self.keys[..., prev : self.offset, :] = keys
+        self.values[..., prev : self.offset, :] = values
+        return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+
+    def size(self):
+        return self.offset
+
+    @property
+    def state(self):
+        if self.offset == self.keys.shape[2]:
+            return self.keys, self.values
+        else:
+            return (
+                self.keys[..., : self.offset, :],
+                self.values[..., : self.offset, :],
+            )
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values = v
+        self.offset = self.keys.shape[2]
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        n = min(self.offset, n)
+        self.offset -= n
+        return n
+
+    def to_quantized(self, group_size: int = 64, bits: int = 4) -> QuantizedKVCache:
+        quant_cache = QuantizedKVCache(group_size=group_size, bits=bits)
+        quant_cache.offset = self.offset
+        if self.keys is not None:
+            quant_cache.keys = mx.quantize(self.keys, group_size=group_size, bits=bits)
+            quant_cache.values = mx.quantize(
+                self.values, group_size=group_size, bits=bits
+            )
+        return quant_cache
+
+    def make_mask(self, *args, **kwargs):
+        return create_attention_mask(*args, offset=self.offset, **kwargs)
+
+    @classmethod
+    def merge(_, caches):
+        return BatchKVCache.merge(caches)
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        if self.keys is None:
+            return 0
+        return self.keys.nbytes + self.values.nbytes
+
+
+class RotatingKVCache(_BaseCache):
+    step = 256
+
+    def __init__(self, max_size, keep=0):
+        self.keep = keep
+        self.keys = None
+        self.values = None
+        self.offset = 0
+        self.max_size = max_size
+        self._idx = 0
+
+    def _trim(self, trim_size, v, append=None):
+        to_cat = []
+        if trim_size > 0:
+            to_cat = [v[..., : self.keep, :], v[..., trim_size + self.keep :, :]]
+        else:
+            to_cat = [v]
+        if append is not None:
+            to_cat.append(append)
+        return mx.concatenate(to_cat, axis=2)
+
+    def _temporal_order(self, v):
+        """
+        Rearrange the cache into temporal order, slicing off the end if unused.
+        """
+        if self._idx == v.shape[2]:
+            return v
+        elif self._idx < self.offset:
+            return mx.concatenate(
+                [
+                    v[..., : self.keep, :],
+                    v[..., self._idx :, :],
+                    v[..., self.keep : self._idx, :],
+                ],
+                axis=2,
+            )
+        else:
+            return v[..., : self._idx, :]
+
+    def _update_concat(self, keys, values):
+        if self.keys is None:
+            self.keys = keys
+            self.values = values
+        else:
+            # Put the keys/values in temporal order to
+            # preserve context
+            self.keys = self._temporal_order(self.keys)
+            self.values = self._temporal_order(self.values)
+            self._idx = self.keys.shape[2]
+
+            # The largest size is self.max_size + S - 1 to ensure
+            # every token gets at least self.max_size context
+            trim_size = self._idx - self.max_size + 1
+            self.keys = self._trim(trim_size, self.keys, keys)
+            self.values = self._trim(trim_size, self.values, values)
+        self.offset += keys.shape[2]
+        self._idx = self.keys.shape[2]
+        return self.keys, self.values
+
+    def _update_in_place(self, keys, values):
+        # May not have hit the max size yet, so potentially
+        # keep growing the cache
+        B, n_kv_heads, S, k_head_dim = keys.shape
+        prev = self.offset
+        if self.keys is None or (
+            prev >= self.keys.shape[2] and self.keys.shape[2] < self.max_size
+        ):
+            v_head_dim = values.shape[3]
+            new_size = min(self.step, self.max_size - prev)
+            k_shape = (B, n_kv_heads, new_size, k_head_dim)
+            v_shape = (B, n_kv_heads, new_size, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+            self._idx = prev
+
+        # Trim if needed
+        trim_size = self.keys.shape[2] - self.max_size
+        if trim_size > 0:
+            self.keys = self._trim(trim_size, self.keys)
+            self.values = self._trim(trim_size, self.values)
+            self._idx = self.max_size
+
+        # Rotate
+        if self._idx == self.max_size:
+            self._idx = self.keep
+
+        # Assign
+        self.keys[..., self._idx : self._idx + S, :] = keys
+        self.values[..., self._idx : self._idx + S, :] = values
+        self.offset += S
+        self._idx += S
+
+        # If the buffer is not full, slice off the end
+        if self.offset < self.max_size:
+            return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+        return self.keys, self.values
+
+    def update_and_fetch(self, keys, values):
+        if keys.shape[2] == 1:
+            return self._update_in_place(keys, values)
+        return self._update_concat(keys, values)
+
+    def size(self):
+        return min(self.offset, self.max_size)
+
+    @property
+    def state(self):
+        if self.offset < self.keys.shape[2]:
+            return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+        else:
+            return self.keys, self.values
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values = v
+
+    @property
+    def meta_state(self):
+        return tuple(map(str, (self.keep, self.max_size, self.offset, self._idx)))
+
+    @meta_state.setter
+    def meta_state(self, v):
+        self.keep, self.max_size, self.offset, self._idx = map(
+            int,
+            v,
+        )
+
+    def is_trimmable(self):
+        return self.offset < self.max_size
+
+    def trim(self, n):
+        n = min(self.offset, n)
+        self.offset -= n
+        self._idx -= n
+        return n
+
+    def to_quantized(self, group_size: int = 64, bits: int = 4) -> QuantizedKVCache:
+        raise NotImplementedError("RotatingKVCache Quantization NYI")
+
+    def make_mask(
+        self, N: int, window_size: Optional[int] = None, return_array: bool = False
+    ):
+        if N > 1:
+            window_size = window_size or self.max_size
+            offset = min(self.max_size - 1, self.offset)
+            if offset + N > window_size or return_array:
+                return create_causal_mask(N, offset, window_size=window_size)
+            else:
+                return "causal"
+        else:
+            if window_size is None:
+                return None
+            # May need a mask for when window_size < max_size
+            if self.offset >= window_size and self.max_size > window_size:
+                idx = self._idx
+                if idx >= self.max_size:
+                    idx = 0
+                if self.offset < self.max_size:
+                    mask_size = self.offset + 1
+                else:
+                    mask_size = self.max_size
+                mask = mx.arange(mask_size) >= (mask_size - window_size)
+                mask = mx.roll(mask, shift=idx + 1)
+                return mask
+
+    @classmethod
+    def merge(_, caches):
+        return BatchRotatingKVCache.merge(caches)
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        if self.keys is None:
+            return 0
+        return self.keys.nbytes + self.values.nbytes
+
+
+class ArraysCache(_BaseCache):
+    def __new__(cls, *args, **kwargs):
+        instance = super().__new__(cls)
+        instance.left_padding = None
+        instance.lengths = None
+        return instance
+
+    def __init__(self, size, left_padding: Optional[List[int]] = None):
+        self.cache = [None] * size
+        if left_padding:
+            self.left_padding = mx.array(left_padding)
+
+    @property
+    def batch_size(self):
+        for c in self.cache:
+            if c is not None:
+                return c.shape[0]
+        if self.left_padding is not None:
+            return self.left_padding.size
+        elif self.lengths is not None:
+            return self.lengths.size
+        else:
+            return 1
+
+    def __setitem__(self, idx, value):
+        self.cache[idx] = value
+
+    def __getitem__(self, idx):
+        return self.cache[idx]
+
+    @property
+    def state(self):
+        return self.cache
+
+    @state.setter
+    def state(self, v):
+        self.cache = v
+
+    def filter(self, batch_indices):
+        """
+        In-place filter to keep just the given indices in the cache.
+        """
+        self.cache = [c[batch_indices] if c is not None else None for c in self.cache]
+        if self.left_padding is not None:
+            self.left_padding = self.left_padding[batch_indices]
+        if self.lengths is not None:
+            self.lengths = self.lengths[batch_indices]
+
+    def extend(self, other):
+        """
+        In-place extend this cache with the other cache.
+        """
+
+        a_batch = self.batch_size
+        b_batch = other.batch_size
+
+        def cat(a, b):
+            shape = dtype = None
+            if a is not None:
+                shape = a.shape
+                dtype = a.dtype
+            if b is not None:
+                shape = b.shape
+                dtype = b.dtype
+
+            if shape is None:
+                return None
+
+            if a is None:
+                a = mx.zeros((a_batch,) + shape[1:], dtype=dtype)
+            if b is None:
+                b = mx.zeros((b_batch,) + shape[1:], dtype=dtype)
+
+            return mx.concatenate([a, b])
+
+        self.cache = [cat(c, o) for c, o in zip(self.cache, other.cache)]
+        self.left_padding = cat(self.left_padding, other.left_padding)
+        self.lengths = cat(self.lengths, other.lengths)
+
+    def extract(self, idx):
+        cache = ArraysCache(len(self.cache))
+        cache.cache = [c[idx : idx + 1] for c in self.cache]
+        return cache
+
+    def prepare(self, lengths=None, **kwargs):
+        self.lengths = mx.array(lengths)
+
+    def finalize(self):
+        self.lengths = None
+        self.left_padding = None
+
+    def advance(self, N):
+        if self.lengths is not None:
+            self.lengths -= N
+        if self.left_padding is not None:
+            self.left_padding -= N
+
+    def make_mask(self, N: int):
+        if self.left_padding is not None:
+            pos = mx.arange(N)
+            return pos >= self.left_padding[:, None]
+        elif self.lengths is not None:
+            pos = mx.arange(N)
+            return pos < self.lengths[:, None]
+        else:
+            return None
+
+    @classmethod
+    def merge(cls, caches):
+        n_state = len(caches[0].cache)
+        B = len(caches)
+        cache = cls(n_state)
+
+        # All caches are empty so return early
+        if all(c.empty() for c in caches):
+            cache.left_padding = mx.array([0] * B)
+            return cache
+
+        for e in range(n_state):
+            c_init = next(iter(c[e] for c in caches if c[e] is not None))
+            shape = list(c_init.shape)
+            shape[0] = B
+            cache[e] = mx.zeros(shape, c_init.dtype)
+            for i in range(B):
+                if caches[i][e] is None:
+                    continue
+                cache[e][i : i + 1] = caches[i][e]
+        return cache
+
+    def empty(self):
+        return self.cache[0] is None
+
+    @property
+    def nbytes(self):
+        return sum(c.nbytes for c in self.cache if c is not None)
+
+
+class ChunkedKVCache(_BaseCache):
+    step = 256
+
+    def __init__(self, chunk_size):
+        self.keys = None
+        self.values = None
+        self.offset = 0
+        self.chunk_size = chunk_size
+        self.start_position = 0
+
+    def maybe_trim_front(self):
+        # Maintain the cache below the chunk size
+        if self.keys is not None and self.keys.shape[2] >= self.chunk_size:
+            self.start_position += self.keys.shape[2] - self.chunk_size
+            self.keys = self.keys[..., -self.chunk_size :, :]
+            self.values = self.values[..., -self.chunk_size :, :]
+
+    def update_and_fetch(self, keys, values):
+        prev = self.offset - self.start_position
+        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:
+            B, n_kv_heads, _, k_head_dim = keys.shape
+            v_head_dim = values.shape[3]
+            n_steps = (self.step + keys.shape[2] - 1) // self.step
+            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
+            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                if prev % self.step != 0:
+                    self.keys = self.keys[..., :prev, :]
+                    self.values = self.values[..., :prev, :]
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+
+        self.offset += keys.shape[2]
+        end = self.offset - self.start_position
+        self.keys[..., prev:end, :] = keys
+        self.values[..., prev:end, :] = values
+        return self.keys[..., :end, :], self.values[..., :end, :]
+
+    @property
+    def state(self):
+        if self.offset == self.keys.shape[2]:
+            return self.keys, self.values
+        else:
+            return (
+                self.keys[..., : self.offset, :],
+                self.values[..., : self.offset, :],
+            )
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values = v
+        self.offset = self.keys.shape[2]
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        n = min(self.offset - self.start_position, n)
+        self.offset -= n
+        return n
+
+    @property
+    def meta_state(self):
+        return tuple(map(str, (self.chunk_size, self.start_position)))
+
+    @meta_state.setter
+    def meta_state(self, v):
+        self.chunk_size, self.start_position = map(int, v)
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        if self.keys is None:
+            return 0
+        return self.keys.nbytes + self.values.nbytes
+
+
+class CacheList(_BaseCache):
+    def __init__(self, *caches):
+        self.caches = caches
+
+    def __getitem__(self, idx):
+        return self.caches[idx]
+
+    def is_trimmable(self):
+        return all(c.is_trimmable() for c in self.caches)
+
+    def trim(self, n):
+        for c in self.caches:
+            m = c.trim(n)
+        return m
+
+    @property
+    def state(self):
+        return [c.state for c in self.caches]
+
+    @state.setter
+    def state(self, v):
+        for c, s in zip(self.caches, v):
+            c.state = s
+
+    @property
+    def meta_state(self):
+        return (
+            [type(c).__name__ for c in self.caches],
+            [c.meta_state for c in self.caches],
+        )
+
+    @meta_state.setter
+    def meta_state(self, v):
+        for c, m in zip(self.caches, v[1]):
+            c.meta_state = m
+
+    def filter(self, batch_indices):
+        """
+        In-place filter to keep just the given indices in the cache.
+        """
+        for c in self.caches:
+            c.filter(batch_indices)
+
+    def extend(self, other):
+        """
+        In-place extend this cache with the other cache.
+        """
+        for c, o in zip(self.caches, other.caches):
+            c.extend(o)
+
+    @classmethod
+    def merge(cls, caches):
+        cache = cls()
+        cache.caches = tuple(
+            caches[0].caches[i].merge([c.caches[i] for c in caches])
+            for i in range(len(caches[0].caches))
+        )
+        return cache
+
+    def extract(self, idx):
+        return CacheList(*(c.extract(idx) for c in self.caches))
+
+    def prepare(self, **kwargs):
+        for c in self.caches:
+            c.prepare(**kwargs)
+
+    def finalize(self):
+        for c in self.caches:
+            c.finalize()
+
+    def size(self):
+        return max(c.size() for c in self.caches)
+
+    def empty(self):
+        return self.caches[0].empty()
+
+    @property
+    def nbytes(self):
+        return sum(c.nbytes for c in self.caches)
+
+    @classmethod
+    def from_state(cls, state, meta_state):
+        obj = cls.__new__(cls)
+        obj.caches = [
+            globals()[c].from_state(s, m) for s, c, m in zip(state, *meta_state)
+        ]
+        return obj
+
+
+def dynamic_roll(x, shifts, axis):
+    n = x.shape[axis]
+    expand_shifts = (...,) + (None,) * (x.ndim - axis)
+    expand_indices = expand_shifts[:-1]
+    idx = (mx.arange(n)[expand_indices] - shifts[expand_shifts]) % n
+    rolled = mx.take_along_axis(x, idx, axis=axis)
+    return rolled
+
+
+class BatchKVCache(_BaseCache):
+    step = 256
+
+    def __init__(self, left_padding: List[int]):
+        """
+        The BatchKV cache expects inputs to be left-padded.
+
+        E.g. the following prompts:
+
+            [1, 3, 5]
+            [7]
+            [2, 6, 8, 9]
+
+        Should be padded like so:
+
+            [0, 1, 3, 5]
+            [0, 0, 0, 7]
+            [2, 6, 8, 9]
+
+        And ``left_padding`` specifies the amount of padding for each.
+        In this case, ``left_padding = [1, 3, 0]``.
+        """
+        self.keys = None
+        self.values = None
+        self.left_padding = mx.array(left_padding)
+        self.offset = mx.array([-l for l in left_padding])
+        self._idx = 0
+
+        self._right_padding = None
+
+    def update_and_fetch(self, keys, values):
+        prev = self._idx
+        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:
+            B, n_kv_heads, _, k_head_dim = keys.shape
+            v_head_dim = values.shape[3]
+            n_steps = (self.step + keys.shape[2] - 1) // self.step
+            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
+            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                if prev % self.step != 0:
+                    self.keys = self.keys[..., :prev, :]
+                    self.values = self.values[..., :prev, :]
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+
+        self.offset += keys.shape[2]
+        self._idx += keys.shape[2]
+        self.keys[..., prev : self._idx, :] = keys
+        self.values[..., prev : self._idx, :] = values
+        return self.keys[..., : self._idx, :], self.values[..., : self._idx, :]
+
+    def prepare(self, *, left_padding=None, lengths=None, right_padding=None):
+        if left_padding is not None:
+            if self.keys is not None:
+                raise ValueError(
+                    "Left padding can only be added to an empty BatchKVCache"
+                )
+            left_padding = mx.array(left_padding)
+            self.left_padding += left_padding
+            self.offset -= left_padding
+
+        if right_padding is not None and max(right_padding) > 0:
+            self._right_padding = mx.array(right_padding)
+
+    def finalize(self):
+        if self._right_padding is not None:
+            padding = self._right_padding
+            self.keys = dynamic_roll(self.keys, padding[:, None], axis=2)
+            self.values = dynamic_roll(self.values, padding[:, None], axis=2)
+            self.offset -= padding
+            self.left_padding += padding
+            self._right_padding = None
+
+    @property
+    def state(self):
+        k, v = self.keys, self.values
+        if self._idx < k.shape[2]:
+            k = k[..., : self._idx, :]
+            v = v[..., : self._idx, :]
+        return k, v, self.offset, self.left_padding
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values, self.offset, self.left_padding = v
+        self._idx = self.keys.shape[2]
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        n = min(self._idx, n)
+        self._idx -= n
+        self.offset -= n
+        return n
+
+    def make_mask(self, N: int, return_array: bool = False, **kwargs):
+        return create_causal_mask(
+            N, offset=self._idx, left_padding=self.left_padding, **kwargs
+        )
+
+    def filter(self, batch_indices):
+        """
+        In-place filter to keep just the given indices in the cache.
+        """
+        if self.keys is not None:
+            self.keys = self.keys[batch_indices]
+            self.values = self.values[batch_indices]
+        self.offset = self.offset[batch_indices]
+        self.left_padding = self.left_padding[batch_indices]
+
+        # Shift left to reduce padding
+        min_left_pad = self.left_padding.min().item()
+        if min_left_pad > 0:
+            if self.keys is not None:
+                self.keys = self.keys[..., min_left_pad:, :]
+                self.values = self.values[..., min_left_pad:, :]
+            self._idx -= min_left_pad
+            self.left_padding -= min_left_pad
+
+    def extend(self, other):
+        """
+        In-place extend this cache with the other cache.
+        """
+        if self.keys is None and other.keys is None:
+            self.left_padding = mx.concatenate([self.left_padding, other.left_padding])
+            self.offset = mx.concatenate([self.offset, other.offset])
+            return
+
+        max_idx = max(self._idx, other._idx)
+        L1 = L2 = 0
+        if self.keys is not None:
+            B, H, L1, D = self.keys.shape
+            M = self.values.shape[3]
+        if other.keys is not None:
+            B, H, L2, D = other.keys.shape
+            M = other.values.shape[3]
+        max_size = max(L1, L2)
+
+        # Pad the keys and values so they are right-justified
+        # with the index and the same size
+        def pad(c):
+            k, v = c.keys, c.values
+            if k is None:
+                Bc = c.offset.shape[0]
+                k = mx.array([]).reshape(Bc, H, 0, D)
+                v = mx.array([]).reshape(Bc, H, 0, M)
+            left = max_idx - c._idx
+            right = max_size - k.shape[2] - left
+            if right < 0:
+                k = k[..., :right, :]
+                v = v[..., :right, :]
+                right = 0
+            if left != 0 or right != 0:
+                pad = [(0, 0), (0, 0), (left, right), (0, 0)]
+                k = mx.pad(k, pad)
+                v = mx.pad(v, pad)
+            left_padding = c.left_padding + left
+            return k, v, c.offset, left_padding
+
+        self.keys, self.values, self.offset, self.left_padding = map(
+            mx.concatenate, zip(*(pad(self), pad(other)))
+        )
+        self._idx = max_idx
+
+    def extract(self, idx):
+        cache = KVCache()
+        padding = self.left_padding[idx].item()
+        cache.keys = mx.contiguous(self.keys[idx : idx + 1, :, padding : self._idx])
+        cache.values = mx.contiguous(self.values[idx : idx + 1, :, padding : self._idx])
+        cache.offset = cache.keys.shape[2]
+        return cache
+
+    @classmethod
+    def merge(cls, caches):
+        lengths = [c.size() for c in caches]
+        max_length = max(lengths)
+
+        # No cache has content so make an empty one
+        if max_length == 0:
+            return BatchKVCache([0] * len(caches))
+
+        padding = [max_length - l for l in lengths]
+        B = len(caches)
+        H = max(c.keys.shape[1] for c in caches if c.keys is not None)
+        Dk = max(c.keys.shape[3] for c in caches if c.keys is not None)
+        Dv = max(c.values.shape[3] for c in caches if c.values is not None)
+        dt = next(iter(c.keys.dtype for c in caches if c.keys is not None))
+
+        keys = mx.zeros((B, H, max_length, Dk), dtype=dt)
+        values = mx.zeros((B, H, max_length, Dv), dtype=dt)
+        for i, (p, c) in enumerate(zip(padding, caches)):
+            if c.keys is None:
+                continue
+            keys[i : i + 1, :, p : p + c.offset] = c.keys[..., : c.offset, :]
+            values[i : i + 1, :, p : p + c.offset] = c.values[..., : c.offset, :]
+
+        cache = cls(padding)
+        cache.keys = keys
+        cache.values = values
+        cache.offset += keys.shape[2]
+        cache._idx = keys.shape[2]
+
+        return cache
+
+    def size(self):
+        return self._idx
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        if self.keys is None:
+            return 0
+        return self.keys.nbytes + self.values.nbytes
+
+
+class BatchRotatingKVCache(_BaseCache):
+    step = 256
+
+    def __init__(self, max_size, left_padding: List[int]):
+        self.keys = None
+        self.values = None
+
+        self.left_padding = mx.array(left_padding)
+        self.offset = mx.array([-l for l in left_padding])
+
+        self.max_size = max_size
+        self._idx = 0
+        self._offset = 0
+        self.rotated = False
+
+        # Lengths for right_padded inputs to make sure that padding tokens do
+        # not evict valid tokens.
+        self._lengths = None
+
+    def _trim(self, trim_size, v, append=None):
+        if trim_size > 0:
+            v = v[..., trim_size:, :]
+        if append is not None:
+            return mx.concatenate([v, append], axis=2)
+        return v
+
+    def _temporal_order(self):
+        """
+        Rearrange the cache into temporal order.
+        """
+        if self.rotated:
+            self.keys = mx.roll(self.keys, -self._idx, axis=2)
+            self.values = mx.roll(self.values, -self._idx, axis=2)
+            self._idx = self.keys.shape[2]
+            self.rotated = False
+
+    def _update_concat(self, keys, values):
+        if self.keys is None:
+            self.keys = keys
+            self.values = values
+        else:
+            # Put the keys/values in temporal order to
+            # preserve context
+            self._temporal_order()
+
+            # Slice off the end if needed
+            if self.keys.shape[2] > self._idx:
+                self.keys = self.keys[..., : self._idx, :]
+                self.values = self.values[..., : self._idx, :]
+
+            # Roll right sequences that are padded to make sure that we don't
+            # trim valid cache entries
+            if self._lengths is not None:
+                roll = mx.maximum(0, self.offset - self._lengths)
+                self.keys = dynamic_roll(self.keys, roll[:, None], axis=2)
+                self.values = dynamic_roll(self.values, roll[:, None], axis=2)
+                self.left_padding += roll
+                self.offset -= roll
+
+            # The largest size is self.max_size + S - 1 to ensure
+            # every token gets at least self.max_size context
+            trim_size = self._idx - self.max_size + 1
+            if trim_size > 0:
+                self.left_padding -= trim_size
+            self.keys = self._trim(trim_size, self.keys, keys)
+            self.values = self._trim(trim_size, self.values, values)
+        self.offset += keys.shape[2]
+        self._offset += keys.shape[2]
+        self._idx = self.keys.shape[2]
+
+        # Make sure left_padding and offset are evaluated
+        self.keys = mx.depends(self.keys, (self.left_padding, self.offset))
+
+        return self.keys, self.values
+
+    def _update_in_place(self, keys, values):
+        if self._lengths is not None:
+            raise RuntimeError(
+                "finalize() should be called before deocoding with BatchRotatingKVCache"
+            )
+
+        # May not have hit the max size yet, so potentially
+        # keep growing the cache
+        B, n_kv_heads, S, k_head_dim = keys.shape
+        prev = self._offset
+        if self.keys is None or (
+            prev >= self.keys.shape[2] and self.keys.shape[2] < self.max_size
+        ):
+            v_head_dim = values.shape[3]
+            new_size = min(self.step, self.max_size - prev)
+            k_shape = (B, n_kv_heads, new_size, k_head_dim)
+            v_shape = (B, n_kv_heads, new_size, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+            self._idx = prev
+
+        # Trim if needed
+        trim_size = self.keys.shape[2] - self.max_size
+        if trim_size > 0:
+            self.keys = self._trim(trim_size, self.keys)
+            self.values = self._trim(trim_size, self.values)
+            self._idx = self.max_size
+            self.left_padding -= trim_size
+
+        # Rotate
+        if self._idx == self.max_size:
+            self.rotated = True
+            self._idx = 0
+        if self.rotated:
+            self.left_padding -= S
+
+        # Assign
+        self.keys[..., self._idx : self._idx + S, :] = keys
+        self.values[..., self._idx : self._idx + S, :] = values
+        self._offset += S
+        self.offset += S
+        self._idx += S
+
+        # Make sure left_padding and offset are evaluated
+        self.keys = mx.depends(self.keys, (self.left_padding, self.offset))
+
+        # If the buffer is not full, slice off the end
+        if self._offset < self.max_size:
+            return (
+                self.keys[..., : self._offset, :],
+                self.values[..., : self._offset, :],
+            )
+        return self.keys, self.values
+
+    def update_and_fetch(self, keys, values):
+        if keys.shape[2] == 1:
+            return self._update_in_place(keys, values)
+        return self._update_concat(keys, values)
+
+    def prepare(self, *, left_padding=None, lengths=None, right_padding=None):
+        if left_padding is not None:
+            if self.keys is not None:
+                raise ValueError(
+                    "Left padding can only be added to an empty BatchRotatingKVCache"
+                )
+            left_padding = mx.array(left_padding)
+            self.left_padding += left_padding
+            self.offset -= left_padding
+
+        if right_padding is not None and max(right_padding) > 0:
+            self._lengths = mx.array(lengths) + self.offset
+
+    def finalize(self):
+        if self._lengths is not None:
+            roll = mx.maximum(0, self.offset - self._lengths)
+            self.keys = dynamic_roll(self.keys, roll[:, None], axis=2)
+            self.values = dynamic_roll(self.values, roll[:, None], axis=2)
+            self.left_padding += roll
+            self.offset -= roll
+            self._lengths = None
+
+    @property
+    def state(self):
+        k, v = self.keys, self.values
+        if self._offset < k.shape[2]:
+            k, v = k[..., : self._offset, :], v[..., : self._offset, :]
+        return k, v, self.offset, self.left_padding
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values, self.offset, self.left_padding = v
+
+    @property
+    def meta_state(self):
+        return tuple(map(str, (self.max_size, self._offset, self._idx, self.rotated)))
+
+    @meta_state.setter
+    def meta_state(self, v):
+        self.max_size, self._offset, self._idx = map(
+            int,
+            v[:3],
+        )
+        self.rotated = bool(v[3])
+
+    def is_trimmable(self):
+        return self._offset < self.max_size
+
+    def trim(self, n):
+        n = min(self._offset, n)
+        self._offset -= n
+        self._idx -= n
+        self.offset -= n
+        return n
+
+    def to_quantized(self, group_size: int = 64, bits: int = 4) -> QuantizedKVCache:
+        raise NotImplementedError("BatchRotatingKVCache Quantization NYI")
+
+    def make_mask(
+        self, N: int, window_size: Optional[int] = None, return_array: bool = False
+    ):
+        left_padding = self.left_padding
+        window_size = window_size or self.max_size
+        offset = min(self.max_size - 1, self._offset)
+        rinds = mx.arange(offset + N)
+        linds = mx.arange(offset, offset + N) if offset else rinds
+        linds = linds[:, None]
+        rinds = rinds[None]
+        mask = linds >= rinds
+        mask &= linds < rinds + window_size
+        if (trim_size := self._idx - self.max_size + int(N > 1)) > 0:
+            left_padding = left_padding - trim_size
+
+        rotated = N == 1 and (self.rotated or self._idx >= self.max_size)
+        if rotated:
+            left_padding = left_padding - 1
+
+        mask = mask & (rinds >= mx.expand_dims(left_padding, (1, 2, 3)))
+
+        if rotated:
+            idx = self._idx
+            if idx >= self.max_size:
+                idx = 0
+            mask = mx.roll(mask, shift=idx + 1, axis=-1)
+
+        return mask
+
+    def filter(self, batch_indices):
+        """
+        In-place filter to keep just the given indices in the cache.
+        """
+        if self.keys is not None:
+            self.keys = self.keys[batch_indices]
+            self.values = self.values[batch_indices]
+        self.offset = self.offset[batch_indices]
+        self.left_padding = self.left_padding[batch_indices]
+
+    def extend(self, other):
+        """
+        In-place extend this cache with the other cache.
+        """
+        if self.keys is None and other.keys is None:
+            self.left_padding = mx.concatenate([self.left_padding, other.left_padding])
+            self.offset = mx.concatenate([self.offset, other.offset])
+            return
+
+        if (self.rotated != other.rotated) or self._idx != other._idx:
+            self._temporal_order()
+            other._temporal_order()
+
+        max_idx = max(self._idx, other._idx)
+        L1 = L2 = 0
+        if self.keys is not None:
+            B, H, L1, D = self.keys.shape
+            M = self.values.shape[3]
+        if other.keys is not None:
+            B, H, L2, D = other.keys.shape
+            M = other.values.shape[3]
+        max_size = max(L1, L2)
+
+        def pad(c):
+            left = max_idx - c._idx
+            k, v = c.keys, c.values
+            if k is None:
+                Bc = c.offset.shape[0]
+                k = mx.array([]).reshape(Bc, H, 0, D)
+                v = mx.array([]).reshape(Bc, H, 0, M)
+            right = max_size - k.shape[2] - left
+            if right < 0:
+                k = k[..., :right, :]
+                v = v[..., :right, :]
+                right = 0
+            if left != 0 or right != 0:
+                pad = [(0, 0), (0, 0), (left, right), (0, 0)]
+                k = mx.pad(k, pad)
+                v = mx.pad(v, pad)
+            left_padding = c.left_padding + left
+            return k, v, c.offset, left_padding
+
+        self.keys, self.values, self.offset, self.left_padding = map(
+            mx.concatenate, zip(*(pad(self), pad(other)))
+        )
+        self._idx = max_idx
+        self._offset = max(self._offset, other._offset)
+
+    def extract(self, idx):
+        mx.eval(self.left_padding, self.offset)
+        cache = RotatingKVCache(self.max_size)
+        padding = max(0, self.left_padding.tolist()[idx])
+        offset = self.offset.tolist()[idx]
+        cache.keys = self.keys[idx : idx + 1]
+        cache.values = self.values[idx : idx + 1]
+        cache._idx = self._idx
+        if self.rotated:
+            cache.keys = mx.roll(cache.keys, -self._idx, axis=2)
+            cache.values = mx.roll(cache.values, -self._idx, axis=2)
+            cache._idx = self.max_size
+        cache.keys = mx.contiguous(cache.keys[:, :, padding : cache._idx])
+        cache.values = mx.contiguous(cache.values[:, :, padding : cache._idx])
+        cache.offset = offset
+        cache._idx = cache.keys.shape[2]
+        return cache
+
+    @classmethod
+    def merge(cls, caches):
+        if not all(c.max_size == caches[0].max_size for c in caches):
+            raise ValueError(
+                "BatchRotatingKVCache can only merge caches with the same maximum size"
+            )
+
+        offsets = [c.offset for c in caches]
+        lengths = [c.size() for c in caches]
+        max_length = max(lengths)
+
+        # No cache has content so make an empty one
+        if max_length == 0:
+            return cls(caches[0].max_size, [0] * len(caches))
+
+        padding = [max_length - l for l in lengths]
+        B = len(caches)
+        H = max(c.keys.shape[1] for c in caches if c.keys is not None)
+        Dk = max(c.keys.shape[3] for c in caches if c.keys is not None)
+        Dv = max(c.values.shape[3] for c in caches if c.values is not None)
+        dt = next(iter(c.keys.dtype for c in caches if c.keys is not None))
+
+        keys = mx.zeros((B, H, max_length, Dk), dtype=dt)
+        values = mx.zeros((B, H, max_length, Dv), dtype=dt)
+        for i, (p, l, c) in enumerate(zip(padding, lengths, caches)):
+            if c.keys is None:
+                continue
+            keys[i : i + 1, :, p : p + l] = c._temporal_order(c.keys)[..., -l:, :]
+            values[i : i + 1, :, p : p + l] = c._temporal_order(c.values)[..., -l:, :]
+
+        cache = cls(caches[0].max_size, padding)
+        cache.keys = keys
+        cache.values = values
+        cache.offset = mx.array(offsets)
+        cache._idx = keys.shape[2]
+        cache._offset = keys.shape[2]
+
+        return cache
+
+    def size(self):
+        return min(self._offset, self.max_size)
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        if self.keys is None:
+            return 0
+        return self.keys.nbytes + self.values.nbytes
+
+
+class TokenBuffer:
+    """A simple token buffer that can be efficiently appended to in a similar
+    fashion to the KVCache.
+
+    Perhaps these could share some logic in the future.
+    """
+
+    step = 256
+
+    def __init__(self, tokens=[]):
+        self._buffer = mx.array(tokens, dtype=mx.int32)
+        self._size = len(tokens)
+
+    def update_and_fetch(self, tokens):
+        start = self._size
+        end = start + len(tokens)
+
+        new_size = ((end + self.step - 1) // self.step) * self.step
+        if new_size > self._buffer.size:
+            self._buffer = mx.concatenate(
+                [self._buffer, mx.zeros(new_size - self._buffer.size, dtype=mx.int32)]
+            )
+        self._buffer[start:end] = tokens
+        self._size = end
+
+        return self._buffer[:end]
+
+    @property
+    def state(self):
+        return self._buffer
+
+    @property
+    def tokens(self):
+        return self._buffer[: self._size]
+
+
+@dataclass
+class PromptTrieResult:
+    model: Any
+    exact: Optional[List[int]]  # Exact match found
+    shorter: Optional[List[int]]  # Longest prefix with a value
+    longer: Optional[List[int]]  # Shortest value that extends beyond tokens
+    common_prefix: int  # Length of common prefix with any path
+
+
+class PromptTrie:
+    def __init__(self):
+        self._trie = {}
+
+    def add(self, model: Any, tokens: List[int], value: Any):
+        if model not in self._trie:
+            self._trie[model] = {}
+
+        current = self._trie[model]
+        for tok in tokens:
+            if tok not in current:
+                current[tok] = {}
+            current = current[tok]
+        prev = current.get("__value__", None)
+        current["__value__"] = value
+        return prev
+
+    def get(self, model: Any, tokens: List[int]):
+        current = self._trie[model]
+        for tok in tokens:
+            current = current[tok]
+        return current["__value__"]
+
+    def pop(self, model: Any, tokens: List[int]):
+        path = [self._trie[model]]
+        for tok in tokens:
+            path.append(path[-1][tok])
+        value = path[-1].pop("__value__")
+        for i in range(len(tokens), 0, -1):
+            node = path[i]
+            parent = path[i - 1]
+            tok = tokens[i - 1]
+            if len(node) > 0:
+                break
+            del parent[tok]
+        return value
+
+    def pop_prefixes(self, model: Any, tokens: List[int]):
+        values = []
+        current = self._trie[model]
+        for i, tok in enumerate(tokens):
+            if "__value__" in current:
+                values.append((i, current.pop("__value__")))
+            current = current[tok]
+        return values
+
+    def search(self, model: Any, tokens: List[int]) -> PromptTrieResult:
+        if model not in self._trie:
+            return PromptTrieResult(model, None, None, None, 0)
+
+        current = self._trie[model]
+
+        if not tokens and "__value__" in current:
+            return PromptTrieResult(model, [], None, None, 0)
+
+        # Walk the tokens as far as we can
+        last_index = -1
+        index = 0
+        while index < len(tokens) and tokens[index] in current:
+            current = current[tokens[index]]
+            if "__value__" in current:
+                last_index = index
+            index += 1
+
+        # Got an exact match
+        if last_index == len(tokens) - 1 >= 0:
+            return PromptTrieResult(model, tokens, None, None, 0)
+
+        # Check if we found a prefix at any point
+        shorter = None
+        if last_index > 0:
+            shorter = tokens[: last_index + 1]
+
+        # Check for sequences that are longer
+        longer = None
+        common_prefix = index
+        if index > 0:
+            best = None
+            stack = [(current, [])]
+            while stack:
+                current, extra = stack.pop()
+                if "__value__" in current:
+                    if best is None or len(extra) < len(best):
+                        best = extra
+                elif best is None or len(extra) < len(best):
+                    for tok in current:
+                        stack.append((current[tok], extra + [tok]))
+            longer = tokens[:index] + best
+        return PromptTrieResult(model, None, shorter, longer, common_prefix)
+
+
+class LRUPromptCache:
+    @dataclass
+    class CacheEntry:
+        prompt_cache: List[Any]
+        nbytes: int
+        cache_type: str
+
+    class CacheOrder:
+        def __init__(self, ordering: List[str] = ["assistant", "user", "system"]):
+            self._ordering = ordering
+            self._lrus = {k: deque() for k in ordering}
+
+        def __len__(self):
+            return sum(len(lru) for lru in self._lrus.values())
+
+        def push(self, model: Any, tokens: List[Any], cache_type: str = "assistant"):
+            self._lrus[cache_type].append((model, tokens))
+
+        def remove(self, model: Any, tokens: List[Any]):
+            for cache_type in self._ordering:
+                try:
+                    self._lrus[cache_type].remove((model, tokens))
+                    break
+                except ValueError:
+                    pass
+
+        def pop(self):
+            i = 0
+            while i + 1 < len(self._ordering):
+                lru_a = self._lrus[self._ordering[i]]
+                lru_b = self._lrus[self._ordering[i + 1]]
+                if lru_a and len(lru_a) >= len(lru_b):
+                    return lru_a.popleft()
+                i += 1
+            return lru_b.popleft()
+
+    def __init__(self, max_size: int = 10, max_bytes: int = 1 << 63):
+        self.max_size = max_size
+        self.max_bytes = max_bytes
+        self._trie = PromptTrie()
+        self._lru = LRUPromptCache.CacheOrder()
+        self._n_bytes = 0
+        self._n_bytes_by_type = {k: 0 for k in self._lru._ordering}
+
+    def __len__(self):
+        return len(self._lru)
+
+    @property
+    def nbytes(self):
+        return self._n_bytes
+
+    def fetch_nearest_cache(self, model: Any, tokens: List[int]):
+        result = self._trie.search(model, tokens)
+        if result.exact is not None:
+            cache_entry = self._trie.get(result.model, result.exact)
+            return copy.deepcopy(cache_entry.prompt_cache), []
+
+        short_length = len(result.shorter) if result.shorter is not None else 0
+        if result.longer is not None and result.common_prefix > short_length:
+            cache_entry = self._trie.get(result.model, result.longer)
+            if can_trim_prompt_cache(cache_entry.prompt_cache):
+                cache = copy.deepcopy(cache_entry.prompt_cache)
+                prefix = min(len(tokens) - 1, result.common_prefix)
+                num_to_trim = len(result.longer) - prefix
+                trim_prompt_cache(cache, num_to_trim)
+                return cache, tokens[prefix:]
+
+        if short_length > 0:
+            cache_entry = self._trie.get(result.model, result.shorter)
+            return copy.deepcopy(cache_entry.prompt_cache), tokens[short_length:]
+
+        return None, tokens
+
+    def insert_cache(
+        self,
+        model: Any,
+        tokens: List[int],
+        prompt_cache: List[Any],
+        *,
+        cache_type: str = "assistant",
+    ):
+        # Make the cache entry
+        entry = LRUPromptCache.CacheEntry(
+            prompt_cache, sum(c.nbytes for c in prompt_cache), cache_type
+        )
+
+        # Insert into the trie and update the byte counter and lru position
+        self._n_bytes += entry.nbytes
+        self._n_bytes_by_type[cache_type] += entry.nbytes
+        prev = self._trie.add(model, tokens, entry)
+        if prev is not None:
+            self._n_bytes -= prev.nbytes
+            self._n_bytes_by_type[prev.cache_type] -= prev.nbytes
+            self._lru.remove(model, tokens)
+        self._lru.push(model, tokens, cache_type)
+
+        # If it is a trimmable cache remove all prefixes cause they just take
+        # space
+        if can_trim_prompt_cache(prompt_cache):
+            for prefix_len, entry in self._trie.pop_prefixes(model, tokens):
+                self._n_bytes -= entry.nbytes
+                self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+                self._lru.remove(model, tokens[:prefix_len])
+
+        # Ensure we match the constraints
+        if len(self._lru) > self.max_size:
+            model, tokens = self._lru.pop()
+            entry = self._trie.pop(model, tokens)
+            self._n_bytes -= entry.nbytes
+            self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+        while self._n_bytes > self.max_bytes:
+            model, tokens = self._lru.pop()
+            entry = self._trie.pop(model, tokens)
+            self._n_bytes -= entry.nbytes
+            self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+
+    def trim_to(
+        self, *, n_sequences: Optional[int] = None, n_bytes: Optional[int] = None
+    ):
+        n_sequences = max(0, n_sequences) if n_sequences is not None else 1 << 63
+        n_bytes = max(0, n_bytes) if n_bytes is not None else 1 << 63
+
+        while len(self._lru) > n_sequences:
+            model, tokens = self._lru.pop()
+            entry = self._trie.pop(model, tokens)
+            self._n_bytes -= entry.nbytes
+            self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+        while self._n_bytes > n_bytes:
+            model, tokens = self._lru.pop()
+            entry = self._trie.pop(model, tokens)
+            self._n_bytes -= entry.nbytes
+            self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+
+    def stats_by_type(self):
+        result = {}
+        for cache_type in self._lru._ordering:
+            result[cache_type] = {
+                "n_sequences": len(self._lru._lrus[cache_type]),
+                "n_bytes": self._n_bytes_by_type[cache_type],
+            }
+        return result
+
+# ===== file: mtplx/cache_state.py =====
+"""Conservative cache snapshot helpers for correctness gates."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import importlib
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Any
+
+from .attention_context import current_attention_phase
+from .compile_state import is_compile_trace_error
+from .rope_origin import RotaryOrigin
+
+SUPPORTED_DETACH_MODES = {
+    "eval_only",
+    "contiguous_eval",
+    "selected_slice_contiguous_eval",
+    "metal_copy_leaf",
+}
+
+
+@dataclass(frozen=True)
+class CacheSnapshot:
+    states: tuple[Any, ...]
+    meta_states: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class _PagedGQARouteDecision:
+    route: str
+    reason: str
+    requested_route: str
+    min_context: int
+    min_q: int
+    max_q: int
+
+
+def _normalize_detach_mode(mode: str) -> str:
+    normalized = mode.strip().lower().replace("-", "_")
+    if normalized not in SUPPORTED_DETACH_MODES:
+        raise ValueError(
+            "detach mode must be one of "
+            f"{sorted(SUPPORTED_DETACH_MODES)}; got {mode!r}"
+        )
+    return normalized
+
+
+class TailOwnedKVCache:
+    """KV cache that owner-copies the newly produced attention tail.
+
+    Stock MLX KV cache stores each new K/V slice directly into a persistent
+    cache. This diagnostic keeps the same logical cache contract but cuts the
+    tail tensor's lazy lineage before insertion, which is far cheaper than
+    periodically copying the whole historical KV buffer.
+    """
+
+    def __init__(
+        self,
+        *,
+        mode: str = "contiguous_eval",
+        step: int = 256,
+        keys: Any | None = None,
+        values: Any | None = None,
+        offset: int = 0,
+    ) -> None:
+        self.keys = keys
+        self.values = values
+        self.offset = int(offset)
+        self.step = int(step)
+        self.mode = _normalize_detach_mode(mode)
+        self.tail_owner_updates = 0
+        self.tail_owner_arrays = 0
+        self.tail_owner_bytes = 0
+        self.tail_owner_time_s = 0.0
+
+    @classmethod
+    def from_cache(cls, entry: Any, *, mode: str, step: int | None = None) -> "TailOwnedKVCache":
+        return cls(
+            mode=mode,
+            step=int(step or getattr(entry, "step", 256)),
+            keys=getattr(entry, "keys", None),
+            values=getattr(entry, "values", None),
+            offset=int(getattr(entry, "offset", 0)),
+        )
+
+    def _own_tail(self, keys: Any, values: Any) -> tuple[Any, Any]:
+        started = time.perf_counter()
+        owned_keys = detach_array_leaf(keys, mode=self.mode)
+        owned_values = detach_array_leaf(values, mode=self.mode)
+        self.tail_owner_time_s += time.perf_counter() - started
+        self.tail_owner_updates += 1
+        self.tail_owner_arrays += 2
+        self.tail_owner_bytes += int(owned_keys.nbytes) + int(owned_values.nbytes)
+        return owned_keys, owned_values
+
+    def update_and_fetch(self, keys: Any, values: Any) -> tuple[Any, Any]:
+        import mlx.core as mx
+
+        keys, values = self._own_tail(keys, values)
+        prev = self.offset
+        steps = int(keys.shape[2])
+        if self.keys is None or (prev + steps) > self.keys.shape[2]:
+            B, n_kv_heads, _, k_head_dim = keys.shape
+            v_head_dim = values.shape[3]
+            n_steps = (self.step + steps - 1) // self.step
+            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
+            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                if prev % self.step != 0:
+                    self.keys = self.keys[..., :prev, :]
+                    self.values = self.values[..., :prev, :]
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+
+        self.offset += steps
+        self.keys[..., prev : self.offset, :] = keys
+        self.values[..., prev : self.offset, :] = values
+        return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+
+    def size(self) -> int:
+        return int(self.offset)
+
+    @property
+    def state(self):
+        if self.keys is None or self.values is None:
+            return self.keys, self.values
+        if self.offset == self.keys.shape[2]:
+            return self.keys, self.values
+        return (
+            self.keys[..., : self.offset, :],
+            self.values[..., : self.offset, :],
+        )
+
+    @state.setter
+    def state(self, value) -> None:
+        self.keys, self.values = value
+        self.offset = 0 if self.keys is None else int(self.keys.shape[2])
+
+    @property
+    def meta_state(self) -> tuple[str, ...]:
+        return (str(self.step), str(self.offset), self.mode)
+
+    @meta_state.setter
+    def meta_state(self, value) -> None:
+        if not value:
+            return
+        self.step = int(value[0])
+        self.offset = int(value[1])
+        if len(value) > 2:
+            self.mode = _normalize_detach_mode(str(value[2]))
+
+    def is_trimmable(self) -> bool:
+        return True
+
+    def trim(self, n: int) -> int:
+        n = min(int(self.offset), int(n))
+        self.offset -= n
+        return n
+
+    def make_mask(self, *args, **kwargs):
+        from mlx_lm.models.cache import create_attention_mask
+
+        return create_attention_mask(*args, offset=self.offset, **kwargs)
+
+    def empty(self) -> bool:
+        return self.keys is None
+
+    @property
+    def nbytes(self) -> int:
+        if self.keys is None or self.values is None:
+            return 0
+        return int(self.keys.nbytes) + int(self.values.nbytes)
+
+    def tail_owner_stats(self) -> dict[str, int | float | str]:
+        return {
+            "mode": self.mode,
+            "updates": int(self.tail_owner_updates),
+            "arrays": int(self.tail_owner_arrays),
+            "bytes": int(self.tail_owner_bytes),
+            "time_s": float(self.tail_owner_time_s),
+        }
+
+
+class BlockOwnedKVCache(TailOwnedKVCache):
+    """Full-attention KV cache with independent physical token blocks."""
+
+    def __init__(
+        self,
+        *,
+        mode: str = "contiguous_eval",
+        block_size: int = 1024,
+        keys: Any | None = None,
+        values: Any | None = None,
+        offset: int = 0,
+    ) -> None:
+        self.block_size = int(block_size)
+        self.key_blocks: list[Any] = []
+        self.value_blocks: list[Any] = []
+        self._pending_keys = None
+        self._pending_values = None
+        self._tail_shape: tuple[int, int, int] | None = None
+        self._tail_dtypes: tuple[Any, Any] | None = None
+        super().__init__(mode=mode, step=block_size, offset=0)
+        if keys is not None and values is not None:
+            self._load_contiguous_state(keys, values, int(offset))
+
+    @classmethod
+    def from_cache(
+        cls,
+        entry: Any,
+        *,
+        mode: str,
+        block_size: int | None = None,
+    ) -> "BlockOwnedKVCache":
+        return cls(
+            mode=mode,
+            block_size=int(block_size or getattr(entry, "step", 1024) or 1024),
+            keys=getattr(entry, "keys", None),
+            values=getattr(entry, "values", None),
+            offset=int(getattr(entry, "offset", 0)),
+        )
+
+    def _record_shape(self, keys: Any, values: Any) -> None:
+        self._tail_shape = (
+            int(keys.shape[0]),
+            int(keys.shape[1]),
+            int(keys.shape[3]),
+        )
+        self._tail_dtypes = (keys.dtype, values.dtype)
+
+    def _new_blocks_like(self, keys: Any, values: Any) -> tuple[Any, Any]:
+        import mlx.core as mx
+
+        B, n_kv_heads, _, k_head_dim = keys.shape
+        v_head_dim = int(values.shape[3])
+        key_block = mx.zeros(
+            (B, n_kv_heads, self.block_size, k_head_dim),
+            dtype=keys.dtype,
+        )
+        value_block = mx.zeros(
+            (B, n_kv_heads, self.block_size, v_head_dim),
+            dtype=values.dtype,
+        )
+        mx.eval(key_block, value_block)
+        return key_block, value_block
+
+    def _ensure_capacity_for(self, absolute_pos: int, keys: Any, values: Any) -> None:
+        needed_blocks = (int(absolute_pos) // self.block_size) + 1
+        while len(self.key_blocks) < needed_blocks:
+            key_block, value_block = self._new_blocks_like(keys, values)
+            self.key_blocks.append(key_block)
+            self.value_blocks.append(value_block)
+
+    def _finalize_block(self, block_index: int) -> None:
+        import mlx.core as mx
+
+        key_block = mx.contiguous(self.key_blocks[block_index])
+        value_block = mx.contiguous(self.value_blocks[block_index])
+        mx.eval(key_block, value_block)
+        self.key_blocks[block_index] = key_block
+        self.value_blocks[block_index] = value_block
+
+    def _load_contiguous_state(self, keys: Any, values: Any, offset: int) -> None:
+        self.key_blocks = []
+        self.value_blocks = []
+        self._pending_keys = None
+        self._pending_values = None
+        self.offset = 0
+        total = int(offset)
+        if total <= 0:
+            return
+        self._record_shape(keys, values)
+        cursor = 0
+        while cursor < total:
+            take = min(self.block_size, total - cursor)
+            key_block, value_block = self._new_blocks_like(keys, values)
+            key_tail = keys[..., cursor : cursor + take, :]
+            value_tail = values[..., cursor : cursor + take, :]
+            key_tail, value_tail = self._own_tail(key_tail, value_tail)
+            key_block[..., :take, :] = key_tail
+            value_block[..., :take, :] = value_tail
+            self.key_blocks.append(key_block)
+            self.value_blocks.append(value_block)
+            if take == self.block_size:
+                self._finalize_block(len(self.key_blocks) - 1)
+            cursor += take
+        self.offset = total
+
+    @property
+    def keys(self):
+        return self._active_arrays()[0]
+
+    @keys.setter
+    def keys(self, value) -> None:
+        if value is None:
+            self.key_blocks = []
+            self.value_blocks = []
+            self.offset = 0
+            self._pending_keys = None
+            return
+        self._pending_keys = value
+        if self._pending_values is not None:
+            self._load_contiguous_state(
+                self._pending_keys,
+                self._pending_values,
+                int(value.shape[2]),
+            )
+
+    @property
+    def values(self):
+        return self._active_arrays()[1]
+
+    @values.setter
+    def values(self, value) -> None:
+        if value is None:
+            self._pending_values = None
+            return
+        self._pending_values = value
+        if self._pending_keys is not None:
+            self._load_contiguous_state(
+                self._pending_keys,
+                self._pending_values,
+                int(value.shape[2]),
+            )
+
+    def _active_arrays(self) -> tuple[Any | None, Any | None]:
+        import mlx.core as mx
+
+        if self.offset <= 0 or not self.key_blocks:
+            return None, None
+        full_blocks = self.offset // self.block_size
+        partial = self.offset % self.block_size
+        key_parts = list(self.key_blocks[:full_blocks])
+        value_parts = list(self.value_blocks[:full_blocks])
+        if partial:
+            key_parts.append(self.key_blocks[full_blocks][..., :partial, :])
+            value_parts.append(self.value_blocks[full_blocks][..., :partial, :])
+        if len(key_parts) == 1:
+            return key_parts[0], value_parts[0]
+        return mx.concatenate(key_parts, axis=2), mx.concatenate(value_parts, axis=2)
+
+    def update_and_fetch(self, keys: Any, values: Any) -> tuple[Any, Any]:
+        self.update_without_fetch(keys, values)
+        active_keys, active_values = self._active_arrays()
+        return active_keys, active_values
+
+    def update_without_fetch(self, keys: Any, values: Any) -> None:
+        self._record_shape(keys, values)
+        steps = int(keys.shape[2])
+        cursor = 0
+        while cursor < steps:
+            absolute_pos = self.offset
+            block_index = absolute_pos // self.block_size
+            in_block = absolute_pos % self.block_size
+            take = min(steps - cursor, self.block_size - in_block)
+            self._ensure_capacity_for(absolute_pos, keys, values)
+            key_tail = keys[..., cursor : cursor + take, :]
+            value_tail = values[..., cursor : cursor + take, :]
+            key_tail, value_tail = self._own_tail(key_tail, value_tail)
+            self.key_blocks[block_index][..., in_block : in_block + take, :] = key_tail
+            self.value_blocks[block_index][..., in_block : in_block + take, :] = value_tail
+            self.offset += take
+            cursor += take
+            if in_block + take == self.block_size:
+                self._finalize_block(block_index)
+
+    def active_block_slices(self) -> list[tuple[int, Any, Any]]:
+        """Return active physical KV block slices as ``(start, keys, values)``."""
+        blocks = []
+        if self.offset <= 0 or not self.key_blocks:
+            return blocks
+        full_blocks = self.offset // self.block_size
+        partial = self.offset % self.block_size
+        for block_index in range(full_blocks):
+            blocks.append(
+                (
+                    block_index * self.block_size,
+                    self.key_blocks[block_index],
+                    self.value_blocks[block_index],
+                )
+            )
+        if partial:
+            blocks.append(
+                (
+                    full_blocks * self.block_size,
+                    self.key_blocks[full_blocks][..., :partial, :],
+                    self.value_blocks[full_blocks][..., :partial, :],
+                )
+            )
+        return blocks
+
+    @property
+    def state(self):
+        return self._active_arrays()
+
+    @state.setter
+    def state(self, value) -> None:
+        keys, values = value
+        self.key_blocks = []
+        self.value_blocks = []
+        self.offset = 0
+        if keys is not None and values is not None:
+            self._load_contiguous_state(keys, values, int(keys.shape[2]))
+
+    @property
+    def meta_state(self) -> tuple[str, ...]:
+        return (str(self.block_size), str(self.offset), self.mode)
+
+    @meta_state.setter
+    def meta_state(self, value) -> None:
+        if not value:
+            return
+        self.block_size = int(value[0])
+        self.step = self.block_size
+        self.offset = int(value[1])
+        if len(value) > 2:
+            self.mode = _normalize_detach_mode(str(value[2]))
+
+    def empty(self) -> bool:
+        return not self.key_blocks or self.offset <= 0
+
+    @property
+    def nbytes(self) -> int:
+        total = 0
+        for key_block, value_block in zip(self.key_blocks, self.value_blocks):
+            total += int(key_block.nbytes) + int(value_block.nbytes)
+        return total
+
+
+def _vllm_metal_reference_path() -> Path:
+    override = os.environ.get("MTPLX_VLLM_METAL_REPO")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parents[1] / "REFERENCES:TOOLS" / "vllm-metal"
+
+
+def _paged_attention_impl_from_env() -> str:
+    return (
+        os.environ.get("MTPLX_VLLM_METAL_PAGED_ATTN_IMPL", "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _paged_gqa_sdpa_route_decision_from_env(
+    *,
+    q_len: int,
+    offset: int,
+    query_heads: int,
+    kv_heads: int,
+) -> _PagedGQARouteDecision:
+    raw = (
+        os.environ.get("MTPLX_VLLM_METAL_PAGED_GQA_SDPA_ROUTE")
+        or os.environ.get("MTPLX_PAGED_GQA_SDPA_ROUTE")
+        or ""
+    ).strip()
+    if not raw and _env_truthy("MTPLX_VLLM_METAL_PAGED_GQA_SDPA"):
+        raw = "auto"
+    route = raw.lower().replace("-", "_")
+    min_context = _env_int("MTPLX_VLLM_METAL_PAGED_GQA_SDPA_MIN_CONTEXT", 65536)
+    min_q = _env_int("MTPLX_VLLM_METAL_PAGED_GQA_SDPA_MIN_Q", 4)
+    max_q = _env_int("MTPLX_VLLM_METAL_PAGED_GQA_SDPA_MAX_Q", 5)
+    if route in {"", "0", "false", "no", "off", "disabled"}:
+        return _PagedGQARouteDecision("", "disabled", route, min_context, min_q, max_q)
+    if route in {"1", "true", "yes", "on"}:
+        route = "auto"
+    if route not in {"auto", "grouped", "per_head", "async_per_head"}:
+        return _PagedGQARouteDecision(
+            "", "unsupported_route", route, min_context, min_q, max_q
+        )
+    q_len = int(q_len)
+    offset = int(offset)
+    query_heads = int(query_heads)
+    kv_heads = int(kv_heads)
+    if kv_heads <= 0 or query_heads <= 0 or query_heads == kv_heads:
+        return _PagedGQARouteDecision("", "not_gqa", route, min_context, min_q, max_q)
+    if query_heads % kv_heads:
+        return _PagedGQARouteDecision(
+            "", "query_heads_not_multiple_of_kv_heads", route, min_context, min_q, max_q
+        )
+    if offset < min_context:
+        return _PagedGQARouteDecision(
+            "", "context_lt_min", route, min_context, min_q, max_q
+        )
+    if q_len < min_q:
+        return _PagedGQARouteDecision("", "q_len_lt_min", route, min_context, min_q, max_q)
+    if q_len > max_q:
+        return _PagedGQARouteDecision("", "q_len_gt_max", route, min_context, min_q, max_q)
+    if route == "auto":
+        route = "async_per_head"
+    return _PagedGQARouteDecision(route, "enabled", route, min_context, min_q, max_q)
+
+
+def _paged_gqa_sdpa_route_from_env(
+    *,
+    q_len: int,
+    offset: int,
+    query_heads: int,
+    kv_heads: int,
+) -> str:
+    return _paged_gqa_sdpa_route_decision_from_env(
+        q_len=q_len,
+        offset=offset,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+    ).route
+
+
+_PAGED_GQA_SDPA_STREAMS: dict[int, list[Any]] = {}
+_PAGED_GQA_SDPA_MASK_CACHE_MAX = 8
+_PAGED_GQA_SDPA_MASK_CACHE: dict[tuple[Any, ...], tuple[Any, Any]] = {}
+
+
+def _paged_gqa_tail_causal_mask(q_len: int, kv_len: int) -> Any:
+    import mlx.core as mx
+
+    q_pos = mx.arange(kv_len - q_len, kv_len)[:, None]
+    k_pos = mx.arange(kv_len)[None, :]
+    return k_pos <= q_pos
+
+
+def _cached_paged_gqa_mask(key: tuple[Any, ...], source: Any, mask: Any) -> Any:
+    if len(_PAGED_GQA_SDPA_MASK_CACHE) >= _PAGED_GQA_SDPA_MASK_CACHE_MAX:
+        _PAGED_GQA_SDPA_MASK_CACHE.clear()
+    _PAGED_GQA_SDPA_MASK_CACHE[key] = (source, mask)
+    return mask
+
+
+def _repeat_paged_gqa_mask(mask: Any, *, q_len: int, kv_len: int, gqa: int) -> Any:
+    import mlx.core as mx
+
+    if mask is None or (isinstance(mask, str) and mask == "causal"):
+        key = ("causal", int(q_len), int(kv_len), int(gqa))
+        cached = _PAGED_GQA_SDPA_MASK_CACHE.get(key)
+        if cached is not None:
+            return cached[1]
+        mask = _paged_gqa_tail_causal_mask(q_len, kv_len)
+        reps = [1] * mask.ndim
+        reps[-2] = int(gqa)
+        return _cached_paged_gqa_mask(key, None, mx.tile(mask, tuple(reps)))
+    if not isinstance(mask, mx.array):
+        return mask
+    if int(mask.shape[-2]) != q_len:
+        return mask
+    key = (
+        "array",
+        id(mask),
+        tuple(int(dim) for dim in mask.shape),
+        str(mask.dtype),
+        int(gqa),
+    )
+    cached = _PAGED_GQA_SDPA_MASK_CACHE.get(key)
+    if cached is not None and cached[0] is mask:
+        return cached[1]
+    reps = [1] * mask.ndim
+    reps[-2] = int(gqa)
+    return _cached_paged_gqa_mask(key, mask, mx.tile(mask, tuple(reps)))
+
+
+def _paged_gqa_sdpa_streams_for(kv_heads: int) -> list[Any]:
+    import mlx.core as mx
+
+    if kv_heads not in _PAGED_GQA_SDPA_STREAMS:
+        _PAGED_GQA_SDPA_STREAMS[kv_heads] = [mx.new_stream(mx.gpu) for _ in range(kv_heads)]
+    return _PAGED_GQA_SDPA_STREAMS[kv_heads]
+
+
+def _paged_gqa_sdpa(
+    *,
+    queries: Any,
+    keys: Any,
+    values: Any,
+    scale: float,
+    mask: Any,
+    route: str,
+) -> Any | None:
+    import mlx.core as mx
+    from mlx_lm.models.base import scaled_dot_product_attention
+
+    batch_size, query_heads, q_len, head_dim = queries.shape
+    _, kv_heads, kv_len, _ = keys.shape
+    if int(batch_size) != 1 or kv_heads <= 0 or query_heads % kv_heads:
+        return None
+    gqa = int(query_heads) // int(kv_heads)
+    grouped_queries = queries.reshape(
+        batch_size,
+        kv_heads,
+        gqa,
+        q_len,
+        head_dim,
+    ).reshape(batch_size, kv_heads, gqa * q_len, head_dim)
+    grouped_mask = _repeat_paged_gqa_mask(mask, q_len=q_len, kv_len=kv_len, gqa=gqa)
+    if route == "grouped":
+        output = scaled_dot_product_attention(
+            grouped_queries,
+            keys,
+            values,
+            cache=None,
+            scale=scale,
+            mask=grouped_mask,
+        )
+    elif route == "per_head":
+        output = mx.concatenate(
+            [
+                scaled_dot_product_attention(
+                    grouped_queries[:, head : head + 1, :, :],
+                    keys[:, head : head + 1, :, :],
+                    values[:, head : head + 1, :, :],
+                    cache=None,
+                    scale=scale,
+                    mask=grouped_mask,
+                )
+                for head in range(kv_heads)
+            ],
+            axis=1,
+        )
+    elif route == "async_per_head":
+        outputs = []
+        for head, stream in enumerate(_paged_gqa_sdpa_streams_for(kv_heads)):
+            with mx.stream(stream):
+                output = scaled_dot_product_attention(
+                    grouped_queries[:, head : head + 1, :, :],
+                    keys[:, head : head + 1, :, :],
+                    values[:, head : head + 1, :, :],
+                    cache=None,
+                    scale=scale,
+                    mask=grouped_mask,
+                )
+                mx.async_eval(output)
+                outputs.append(output)
+        output = mx.concatenate(outputs, axis=1)
+    else:
+        return None
+    return output.reshape(batch_size, kv_heads, gqa, q_len, head_dim).reshape(
+        batch_size,
+        query_heads,
+        q_len,
+        head_dim,
+    )
+
+
+def _dynamic_paged_num_blocks(
+    *,
+    block_size: int,
+    configured_blocks: int,
+    request_tokens: int | None = None,
+) -> int:
+    """Blocks a paged cache is installed (or re-configured) with for the
+    running request. ``request_tokens`` stands in for the request's
+    ``MTPLX_DYNAMIC_PAGED_KV_TOKENS`` when the admission asks before the
+    request's environment is applied."""
+
+    if not _env_truthy("MTPLX_DYNAMIC_PAGED_KV"):
+        return int(configured_blocks)
+    min_blocks = max(
+        int(configured_blocks),
+        _env_int("MTPLX_DYNAMIC_PAGED_KV_MIN_BLOCKS", int(configured_blocks)),
+    )
+    if request_tokens is None:
+        request_tokens = _env_int("MTPLX_DYNAMIC_PAGED_KV_TOKENS", 0)
+    request_tokens = max(0, int(request_tokens))
+    previous_high_water = max(
+        0,
+        _env_int("MTPLX_DYNAMIC_PAGED_KV_PREVIOUS_HIGH_WATER", 0),
+    )
+    session_tokens = int((previous_high_water * 3 + 1) // 2)
+    margin = max(0, _env_int("MTPLX_DYNAMIC_PAGED_KV_MARGIN", 128))
+    needed = max(request_tokens, session_tokens) + margin
+    if needed <= margin:
+        return min_blocks
+    required_blocks = (needed + int(block_size) - 1) // int(block_size)
+    return max(min_blocks, required_blocks)
+
+
+def paged_grown_blocks(current_blocks: int, required_tokens: int, block_size: int) -> int:
+    """The block count a paged cache grows to when ``required_tokens`` do
+    not fit (``VllmMetalPagedKVCache._grow_to_capacity``): what is required,
+    or 1.5 times the current count, and never less than one block more.
+    Geometric growth must not overshoot the serving context window (#150:
+    the 1.5x step at 100k+ ctx allocates GiBs of blocks no request can ever
+    address); a genuinely larger requirement still wins, correctness over
+    the clamp. The admission prices a lease's growth with the same rule."""
+
+    block_size = max(1, int(block_size))
+    current_blocks = int(current_blocks)
+    required_blocks = (int(required_tokens) + block_size - 1) // block_size
+    grown_blocks = max(
+        required_blocks,
+        int((current_blocks * 3 + 1) // 2),
+        current_blocks + 1,
+    )
+    window_tokens = _env_int("MTPLX_CONTEXT_WINDOW_TOKENS", 0)
+    if window_tokens > 0:
+        window_blocks = (int(window_tokens) + block_size - 1) // block_size
+        if window_blocks >= required_blocks:
+            grown_blocks = min(grown_blocks, max(window_blocks, current_blocks))
+    return int(grown_blocks)
+
+
+def _dynamic_paged_growth_blocks(
+    *, block_size: int, current_blocks: int, required_tokens: int
+) -> int | None:
+    """Block count a paged KV store grows to so ``required_tokens`` rows fit.
+
+    None when dynamic growth is off (``MTPLX_DYNAMIC_PAGED_KV`` unset): the
+    caller must refuse the write rather than run past its buffers. The eager
+    pages (``_grow_to_capacity``) and the promoted tensor-offset adapters
+    (``ensure_capacity``) share this policy so both grow the same way; the
+    arithmetic is ``paged_grown_blocks``, which the admission also uses to
+    price a lease's growth.
+    """
+
+    if not _env_truthy("MTPLX_DYNAMIC_PAGED_KV"):
+        return None
+    return paged_grown_blocks(int(current_blocks), int(required_tokens), int(block_size))
+
+
+def _concrete_offset(value: Any) -> int | None:
+    """Host int of a scalar cache offset, or None while ``mx.compile`` traces it.
+
+    On the eager path this is one scalar read, a sync only when the offset is
+    still pending.
+    """
+
+    if isinstance(value, int):
+        return int(value)
+    try:
+        return int(value.item())
+    except ValueError as exc:
+        if is_compile_trace_error(exc):
+            return None
+        raise
+
+
+def paged_lease_capacity_after(
+    capacity_tokens: int,
+    block_size: int,
+    *,
+    prompt_tokens: int,
+    reserved_tokens: int,
+    repages: bool,
+) -> int:
+    """The capacity a leased paged cache ends a prefill with. The prefill's
+    writes grow it when the prompt does not fit (``_write_tail``); the
+    repage after the prefill re-installs it with the request's reservation
+    (``install_vllm_metal_paged_attention_kv_cache``), growing it again when
+    that asks for more. Unchanged when both fit."""
+
+    block_size = max(1, int(block_size))
+    capacity = int(capacity_tokens)
+    if int(prompt_tokens) > capacity:
+        capacity = block_size * paged_grown_blocks(
+            capacity // block_size, int(prompt_tokens), block_size
+        )
+    if repages and _env_truthy("MTPLX_DYNAMIC_PAGED_KV"):
+        configured = int(os.environ.get("MTPLX_VLLM_METAL_PAGED_NUM_BLOCKS") or "1024")
+        wanted = block_size * _dynamic_paged_num_blocks(
+            block_size=block_size,
+            configured_blocks=configured,
+            request_tokens=int(reserved_tokens),
+        )
+        if wanted > capacity:
+            capacity = block_size * paged_grown_blocks(
+                capacity // block_size, wanted, block_size
+            )
+    return int(capacity)
+
+
+def kv_quant_decode_route(
+    bits: int,
+    *,
+    route_offset: int,
+    attention_shape: tuple[int, int, int, int] | None,
+) -> str:
+    """The numerics route a request on a quantized paged cache latches:
+    ``VllmMetalPagedKVCache._kv_quant_route_decision``'s rule, read from the
+    model's attention shape (query heads, KV heads, key and value head
+    dims) instead of a live cache, for pricing a request before it runs."""
+
+    if not VllmMetalPagedKVCache._kv_quant_kernel_enabled() or attention_shape is None:
+        return "dequant"
+    query_heads, kv_heads, k_dim, v_dim = (int(x) for x in attention_shape)
+    if int(bits) == 8:
+        if (
+            VllmMetalPagedKVCache._safe_2pass_paged_q_len(
+                query_heads=query_heads, kv_heads=kv_heads
+            )
+            < 1
+        ):
+            return "dequant"
+    elif int(bits) == 4:
+        if not VllmMetalPagedKVCache._kv_quant_q4_kernel_enabled():
+            return "dequant"
+        if (
+            VllmMetalPagedKVCache._packed_quant_safe_q_len_for(
+                query_heads=query_heads, kv_heads=kv_heads, k_dim=k_dim, v_dim=v_dim
+            )
+            < 1
+        ):
+            return "dequant"
+    else:
+        return "dequant"
+    threshold = int(
+        os.environ.get("MTPLX_VLLM_METAL_PAGED_ATTN_2PASS_THRESHOLD", "1024") or "1024"
+    )
+    return "kernel" if int(route_offset) >= threshold else "dequant"
+
+
+def kv_quant_kernel_q_len(bits: int, attention_shape: tuple[int, int, int, int]) -> int:
+    """The widest call (query rows) the route's kernel takes: wider calls
+    fall back to dequantizing (q8: into the bf16 mirror)."""
+
+    query_heads, kv_heads, k_dim, v_dim = (int(x) for x in attention_shape)
+    if int(bits) == 8:
+        return VllmMetalPagedKVCache._safe_2pass_paged_q_len(
+            query_heads=query_heads, kv_heads=kv_heads
+        )
+    return VllmMetalPagedKVCache._packed_quant_safe_q_len_for(
+        query_heads=query_heads, kv_heads=kv_heads, k_dim=k_dim, v_dim=v_dim
+    )
+
+
+def kv_quant_working_copy_peak_rows(
+    *,
+    existing_rows: int,
+    first_offset: int,
+    last_offset: int,
+    capacity_rows: int,
+    block_size: int,
+) -> int:
+    """The most rows of decode's working copy (the q8 bf16 mirror, the q4
+    head-major bank) a request adds over what its cache already holds.
+
+    Both grow the same way (``_dequant_active_arrays``,
+    ``_quant_bank_arrays``): when a call's offset passes the allocated rows,
+    a buffer of min(capacity, max(offset, 1.5 x rows, block)) rows is
+    allocated and the valid rows copied in, the old buffer alive until the
+    copy lands. A working copy that already holds the reach adds nothing; a
+    new one allocates the prompt's rows at the first call and regrows at the
+    next, so its peak is the first buffer plus the second.
+    """
+
+    rows = max(0, int(existing_rows))
+    base = rows
+    capacity = max(0, int(capacity_rows))
+    last = int(last_offset)
+    offset = max(1, int(first_offset))
+    peak = 0
+    while offset <= last:
+        if offset > rows:
+            grown = min(capacity, max(offset, (rows * 3) // 2, int(block_size)))
+            if grown <= rows:
+                break
+            peak = max(peak, rows + grown - base)
+            rows = grown
+        offset = rows + 1
+    return int(peak)
+
+
+def _paged_attention_requires_external_ops(
+    *,
+    turboquant_config: Any | None = None,
+    kv_quant_config: Any | None = None,
+) -> bool:
+    if turboquant_config is not None:
+        return True
+    if kv_quant_config is not None:
+        return False
+    impl = _paged_attention_impl_from_env()
+    if impl in {"fast_sdpa_gather", "sdpa_gather", "exact_gather"}:
+        return False
+    if impl == "sdpa_2pass_paged":
+        return False
+    if impl == "mlx_vector_paged":
+        return _env_truthy("MTPLX_VLLM_METAL_PAGED_PARTITIONED_ATTN")
+    return True
+
+
+def _load_vllm_metal_ops():
+    errors: list[str] = []
+    override = os.environ.get("MTPLX_VLLM_METAL_REPO", "").strip()
+    if override:
+        repo = Path(override).expanduser()
+        if not repo.exists():
+            raise RuntimeError(f"MTPLX_VLLM_METAL_REPO does not exist: {repo}")
+        repo_text = str(repo)
+        if repo_text not in sys.path:
+            sys.path.insert(0, repo_text)
+        for name in ("vllm_metal.metal", "vllm_metal"):
+            sys.modules.pop(name, None)
+        try:
+            from vllm_metal.metal import get_ops
+
+            return get_ops()
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to load vllm-metal ops from MTPLX_VLLM_METAL_REPO="
+                f"{repo}: {exc}"
+            ) from exc
+
+    try:
+        metal = importlib.import_module("vllm_metal.metal")
+        return metal.get_ops()
+    except Exception as exc:
+        errors.append(f"vendored vllm_metal.metal: {exc}")
+
+    repo = _vllm_metal_reference_path()
+    if repo.exists():
+        repo_text = str(repo)
+        if repo_text not in sys.path:
+            sys.path.insert(0, repo_text)
+        for name in ("vllm_metal.metal", "vllm_metal"):
+            sys.modules.pop(name, None)
+        try:
+            from vllm_metal.metal import get_ops
+
+            return get_ops()
+        except Exception as exc:
+            errors.append(f"reference checkout {repo}: {exc}")
+    else:
+        errors.append(f"reference checkout missing: {repo}")
+
+    raise RuntimeError(
+        "vllm-metal paged-attention ops are unavailable; "
+        + "; ".join(errors)
+        + ". Install MTPLX with its Darwin/arm64 dependencies or set "
+        "MTPLX_VLLM_METAL_REPO to a working vllm-metal checkout."
+    )
+
+
+# Module-level latch so we only warn once per process when the optional
+# vllm-metal external ops can't load. Subsequent calls stay silent.
+_VLLM_METAL_OPS_UNAVAILABLE_WARNED = False
+
+
+def _warn_vllm_metal_ops_unavailable(exc: BaseException, *, context: str) -> None:
+    """Emit a single, plain-stderr warning when external ops are missing.
+
+    We deliberately avoid the ``warnings`` module here because MTPLX runs under
+    request-scoped warning filters that can swallow the message; a direct
+    ``print`` to stderr is what the operator actually sees in the server log.
+    """
+
+    global _VLLM_METAL_OPS_UNAVAILABLE_WARNED
+    if _VLLM_METAL_OPS_UNAVAILABLE_WARNED:
+        return
+    _VLLM_METAL_OPS_UNAVAILABLE_WARNED = True
+    print(
+        f"mtplx: vllm-metal external ops unavailable ({context}): {exc}; "
+        "falling back to packaged paged-attention path. Install nanobind and "
+        "build vllm_metal/paged_ops.cpp, or set MTPLX_VLLM_METAL_REPO, to "
+        "re-enable the external ops.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _load_vllm_metal_ops_optional(*, context: str):
+    """Load vllm-metal ops if available; return ``None`` (and warn once) if not.
+
+    Use this on the graceful-fallback paths where the caller has a valid
+    in-tree alternative.  Use ``_load_vllm_metal_ops`` directly only for
+    diagnostic / explicitly-required paths.
+    """
+
+    try:
+        return _load_vllm_metal_ops()
+    except RuntimeError as exc:
+        _warn_vllm_metal_ops_unavailable(exc, context=context)
+        return None
+
+
+class VllmMetalPagedKVCache:
+    """Preallocated full-attention KV pages backed by vLLM-Metal primitives.
+
+    This is an opt-in diagnostic cache for Step 11B/11C.  It stores accepted K/V
+    in physical token pages shaped like vLLM-Metal's paged attention kernel:
+    ``[num_blocks, block_size, num_kv_heads, head_dim]``.  Logical positions are
+    currently contiguous from zero, so the block table is trivial while still
+    exercising the native paged read path.
+    """
+
+    def __init__(
+        self,
+        *,
+        block_size: int = 16,
+        num_blocks: int = 1024,
+        keys: Any | None = None,
+        values: Any | None = None,
+        offset: int = 0,
+        turboquant_config: Any | None = None,
+        kv_quant_config: Any | None = None,
+    ) -> None:
+        self.block_size = int(block_size)
+        self.num_blocks = int(num_blocks)
+        self.offset = 0
+        self.key_cache = None
+        self.value_cache = None
+        self.key_scale_cache = None
+        self.value_scale_cache = None
+        self.key_zero_cache = None
+        self.turboquant_config = turboquant_config
+        self.turboquant = turboquant_config is not None
+        self.kv_quant_config = kv_quant_config
+        self.kv_quant = kv_quant_config is not None
+        self._shape: tuple[int, int, int] | None = None
+        self._dtypes: tuple[Any, Any] | None = None
+        self.update_calls = 0
+        self.paged_attention_calls = 0
+        self.partitioned_attention_calls = 0
+        self.turboquant_attention_calls = 0
+        self.kv_quant_attention_calls = 0
+        self.gqa_sdpa_calls = 0
+        self.gqa_sdpa_calls_by_route: dict[str, int] = {}
+        self.gqa_sdpa_calls_by_phase: dict[str, int] = {}
+        self.gqa_sdpa_route_misses_by_phase_reason: dict[str, int] = {}
+        self.gqa_sdpa_route_misses_by_q_len: dict[str, int] = {}
+        self.gqa_sdpa_last_route_miss: dict[str, int | str] = {}
+        self.active_array_calls = 0
+        self.active_array_time_s = 0.0
+        self.kv_quant_dequant_calls = 0
+        self.kv_quant_dequant_time_s = 0.0
+        self.kv_quant_dequant_tokens = 0
+        self.kv_quant_dequant_memo_hits = 0
+        self.kv_quant_dequant_memo_rebuilds = 0
+        self.kv_quant_kernel_calls = 0
+        # Incremental dequant memo: a bf16 mirror of the quantized cache that
+        # is extended tail-only per step. Without it every attention call on
+        # the dequant fallback re-dequantized the whole prefix — O(context)
+        # per token, the q8/q4 decode collapse. q8-only, sized to the offset
+        # (geometric growth, never the paged capacity), and released when a
+        # request latches the q8-kernel route — a persistent capacity-sized
+        # mirror inverted the feature's memory promise (quantized + full
+        # bf16 > plain bf16). q4 keeps no bf16 mirror at all — its kernel
+        # route reads the quantized bank below instead. dict: mirror_k,
+        # mirror_v (flat [rows, heads, dim]), tokens (valid prefix rows).
+        self._dequant_memo: dict[str, Any] | None = None
+        # Head-major QUANTIZED bank for the packed-quant kernel (q4 route):
+        # [1, H_kv, rows, packed] payloads + [1, H_kv, rows, 1] fp32 scales,
+        # the transposed twin of the token-major pages, extended tail-only
+        # per step under the same lifecycle as the dequant memo. It stores
+        # the same integers the pages hold (transpose commutes with the
+        # rowwise quantizer), so at q4 it costs ~0.26x of a bf16 mirror
+        # instead of inverting the memory promise. dict: k, v, ks, vs
+        # ([1, heads, rows, width]), tokens (valid prefix rows).
+        self._quant_bank: dict[str, Any] | None = None
+        self.kv_quant_bank_rebuilds = 0
+        self.kv_quant_bank_extended_tokens = 0
+        # Per-request numerics route for kv_quant attention: None until the
+        # request's first attention call latches "kernel" or "dequant" from
+        # the offset it starts attending at. Deciding once per request keeps
+        # temp-0 outputs on ONE math path — a per-call offset check switched
+        # numerics mid-generation when a request crossed the two-pass
+        # threshold.
+        self._kv_quant_route: str | None = None
+        self._kv_quant_route_offset = -1
+        self.dense_fallback_calls = 0
+        self.dense_fallback_calls_by_phase: dict[str, int] = {}
+        self.paged_attention_bailouts_by_phase_reason: dict[str, int] = {}
+        self.paged_attention_last_bailout: dict[str, int | str] = {}
+        self.paged_attention_large_q_path = ""
+        self.large_q_split_sdpa_fallback_calls = 0
+        self.large_q_split_sdpa_fallback_calls_by_phase: dict[str, int] = {}
+        self.partitioned_paged_calls = 0
+        self.partitioned_paged_calls_by_phase: dict[str, int] = {}
+        self.grow_events = 0
+        self.cache_write_time_s = 0.0
+        self.attention_time_s = 0.0
+        if keys is not None and values is not None:
+            self._load_contiguous_state(keys, values, int(offset))
+
+    @classmethod
+    def from_cache(
+        cls,
+        entry: Any,
+        *,
+        block_size: int = 16,
+        num_blocks: int = 1024,
+        turboquant_config: Any | None = None,
+        kv_quant_config: Any | None = None,
+    ) -> "VllmMetalPagedKVCache":
+        return cls(
+            block_size=block_size,
+            num_blocks=num_blocks,
+            keys=getattr(entry, "keys", None),
+            values=getattr(entry, "values", None),
+            offset=int(getattr(entry, "offset", 0)),
+            turboquant_config=turboquant_config,
+            kv_quant_config=kv_quant_config,
+        )
+
+    @property
+    def allocated_blocks(self) -> int | None:
+        """Physical block count of the live pages (None before allocation)."""
+        return None if self.key_cache is None else int(self.key_cache.shape[0])
+
+    @property
+    def capacity(self) -> int:
+        # Capacity is a fact about the allocated pages, not about the mutable
+        # num_blocks claim — re-configs and snapshot restores stomp the claim
+        # without reallocating, and a lying capacity skips the growth guard
+        # into silent scatter truncation (#310).
+        allocated_blocks = self.allocated_blocks
+        return int(self.block_size) * int(
+            self.num_blocks if allocated_blocks is None else allocated_blocks
+        )
+
+    def _grow_to_capacity(self, required_tokens: int) -> bool:
+        allocated_blocks = self.allocated_blocks
+        current_blocks = (
+            int(self.num_blocks) if allocated_blocks is None else int(allocated_blocks)
+        )
+        grown_blocks = _dynamic_paged_growth_blocks(
+            block_size=self.block_size,
+            current_blocks=current_blocks,
+            required_tokens=required_tokens,
+        )
+        if grown_blocks is None:
+            return False
+        if grown_blocks <= current_blocks:
+            self.num_blocks = int(current_blocks)
+            return True
+        if self.key_cache is None or self.value_cache is None:
+            self.num_blocks = int(grown_blocks)
+            self.grow_events += 1
+            return True
+
+        import mlx.core as mx
+
+        extra_blocks = int(grown_blocks) - int(current_blocks)
+        key_extra = mx.zeros(
+            (extra_blocks, *self.key_cache.shape[1:]),
+            dtype=self.key_cache.dtype,
+        )
+        value_extra = mx.zeros(
+            (extra_blocks, *self.value_cache.shape[1:]),
+            dtype=self.value_cache.dtype,
+        )
+        grown_arrays = [key_extra, value_extra]
+        self.key_cache = mx.concatenate([self.key_cache, key_extra], axis=0)
+        self.value_cache = mx.concatenate([self.value_cache, value_extra], axis=0)
+        grown_arrays.extend([self.key_cache, self.value_cache])
+        if self.key_scale_cache is not None:
+            extra = mx.zeros(
+                (extra_blocks, *self.key_scale_cache.shape[1:]),
+                dtype=self.key_scale_cache.dtype,
+            )
+            self.key_scale_cache = mx.concatenate([self.key_scale_cache, extra], axis=0)
+            grown_arrays.extend([extra, self.key_scale_cache])
+        if self.value_scale_cache is not None:
+            extra = mx.zeros(
+                (extra_blocks, *self.value_scale_cache.shape[1:]),
+                dtype=self.value_scale_cache.dtype,
+            )
+            self.value_scale_cache = mx.concatenate([self.value_scale_cache, extra], axis=0)
+            grown_arrays.extend([extra, self.value_scale_cache])
+        if self.key_zero_cache is not None:
+            extra = mx.zeros(
+                (extra_blocks, *self.key_zero_cache.shape[1:]),
+                dtype=self.key_zero_cache.dtype,
+            )
+            self.key_zero_cache = mx.concatenate([self.key_zero_cache, extra], axis=0)
+            grown_arrays.extend([extra, self.key_zero_cache])
+        self.num_blocks = int(grown_blocks)
+        self.grow_events += 1
+        mx.eval(*grown_arrays)
+        return True
+
+    def _ensure_allocated(self, keys: Any, values: Any) -> None:
+        import mlx.core as mx
+
+        if int(keys.shape[0]) != 1:
+            raise ValueError("VllmMetalPagedKVCache currently supports batch size 1")
+        shape = (int(keys.shape[1]), int(keys.shape[3]), int(values.shape[3]))
+        dtypes = (keys.dtype, values.dtype)
+        if self.key_cache is not None:
+            if self._shape != shape or self._dtypes != dtypes:
+                raise ValueError(
+                    "paged KV cache shape/dtype changed: "
+                    f"had {self._shape}/{self._dtypes}, got {shape}/{dtypes}"
+                )
+            return
+        # Fresh allocation: any surviving dequant mirror or quantized bank
+        # belongs to the previous buffer's contents and must not be served
+        # against the new one (single choke point for every reset ->
+        # reallocate path). The kv_quant numerics route re-latches with the
+        # new contents too.
+        self._invalidate_dequant_memo()
+        self._invalidate_quant_bank()
+        self._reset_kv_quant_route()
+        n_kv_heads, k_head_dim, v_head_dim = shape
+        # Defense-in-depth: if a TurboQuant cache reaches first allocation but
+        # the external vllm-metal ops can't load, gracefully degrade to the
+        # plain paged layout instead of crashing the in-flight request. The
+        # install-time path already drops turboquant_config when ops are
+        # missing, but downstream callers (e.g. snapshot restore) may still
+        # construct a TurboQuant cache without going through that gate.
+        if self.turboquant and _load_vllm_metal_ops_optional(
+            context="TurboQuant cache allocation"
+        ) is None:
+            self.turboquant = False
+            self.turboquant_config = None
+        if self.turboquant:
+            from .turboquant import (
+                SCALE_GROUP_SIZE,
+                packed_dim,
+                value_centroids,
+                validate_head_dim,
+            )
+
+            validate_head_dim(k_head_dim)
+            validate_head_dim(v_head_dim)
+            cfg = self.turboquant_config
+            key_dtype = mx.int8 if cfg.key_dtype_name == "int8" else mx.uint8
+            self.key_cache = mx.zeros(
+                (
+                    self.num_blocks,
+                    self.block_size,
+                    n_kv_heads,
+                    packed_dim(k_head_dim, int(cfg.key_bits)),
+                ),
+                dtype=key_dtype,
+            )
+            self.value_cache = mx.zeros(
+                (
+                    self.num_blocks,
+                    self.block_size,
+                    n_kv_heads,
+                    packed_dim(v_head_dim, int(cfg.value_bits)),
+                ),
+                dtype=mx.uint8,
+            )
+            scale_shape = (
+                self.num_blocks,
+                self.block_size,
+                n_kv_heads,
+                k_head_dim // SCALE_GROUP_SIZE,
+            )
+            self.key_scale_cache = mx.zeros(scale_shape, dtype=mx.float16)
+            self.value_scale_cache = mx.zeros(scale_shape, dtype=mx.float16)
+            self.key_zero_cache = mx.zeros(scale_shape, dtype=mx.float16)
+            self._turboquant_v_centroids = mx.array(
+                value_centroids(int(cfg.value_bits)), dtype=mx.float32
+            )
+            mx.eval(
+                self.key_cache,
+                self.value_cache,
+                self.key_scale_cache,
+                self.value_scale_cache,
+                self.key_zero_cache,
+                self._turboquant_v_centroids,
+            )
+        elif self.kv_quant:
+            from .kv_quant import packed_dim
+
+            cfg = self.kv_quant_config
+            bits = int(cfg.bits)
+            cache_dtype = mx.int8 if bits == 8 else mx.uint8
+            self.key_cache = mx.zeros(
+                (
+                    self.num_blocks,
+                    self.block_size,
+                    n_kv_heads,
+                    packed_dim(k_head_dim, bits),
+                ),
+                dtype=cache_dtype,
+            )
+            self.value_cache = mx.zeros(
+                (
+                    self.num_blocks,
+                    self.block_size,
+                    n_kv_heads,
+                    packed_dim(v_head_dim, bits),
+                ),
+                dtype=cache_dtype,
+            )
+            scale_shape = (self.num_blocks, self.block_size, n_kv_heads, 1)
+            # fp32 scales: quantize_symmetric computes them in fp32 and every
+            # consumer multiplies in fp32; storing fp16 only added rounding
+            # error (see kv_quant.quantize_symmetric).
+            self.key_scale_cache = mx.zeros(scale_shape, dtype=mx.float32)
+            self.value_scale_cache = mx.zeros(scale_shape, dtype=mx.float32)
+            self.key_zero_cache = None
+            mx.eval(
+                self.key_cache,
+                self.value_cache,
+                self.key_scale_cache,
+                self.value_scale_cache,
+            )
+        else:
+            self.key_cache = mx.zeros(
+                (self.num_blocks, self.block_size, n_kv_heads, k_head_dim),
+                dtype=keys.dtype,
+            )
+            self.value_cache = mx.zeros(
+                (self.num_blocks, self.block_size, n_kv_heads, v_head_dim),
+                dtype=values.dtype,
+            )
+            mx.eval(self.key_cache, self.value_cache)
+        self._shape = shape
+        self._dtypes = dtypes
+
+    def _write_tail(self, keys: Any, values: Any) -> None:
+        import mlx.core as mx
+
+        self._ensure_allocated(keys, values)
+        steps = int(keys.shape[2])
+        if self.offset + steps > self.capacity:
+            required = self.offset + steps
+            if not self._grow_to_capacity(required):
+                raise ValueError(
+                    f"paged KV cache capacity exceeded: {required} > {self.capacity}"
+                )
+        started = time.perf_counter()
+        slot_mapping = mx.arange(self.offset, self.offset + steps, dtype=mx.int64)
+        k_3d = mx.contiguous(keys[0].transpose(1, 0, 2))
+        v_3d = mx.contiguous(values[0].transpose(1, 0, 2))
+        if self.turboquant:
+            if (
+                self.key_scale_cache is None
+                or self.value_scale_cache is None
+                or self.key_zero_cache is None
+            ):
+                raise RuntimeError("TurboQuant scale caches were not allocated")
+            cfg = self.turboquant_config
+            ops = _load_vllm_metal_ops_optional(context="TurboQuant tq_encode")
+            if ops is None or not hasattr(ops, "tq_encode"):
+                # Graceful fallback: external ops are missing or stripped down.
+                # Drop the TurboQuant snapshot path for this cache and reroute
+                # to the plain paged layout. The cache is still empty for this
+                # write (no prior tq_encode could have succeeded without ops),
+                # so it is safe to re-allocate.
+                if ops is not None and not hasattr(ops, "tq_encode"):
+                    _warn_vllm_metal_ops_unavailable(
+                        RuntimeError(
+                            "local vLLM-Metal ops do not expose tq_encode"
+                        ),
+                        context="TurboQuant tq_encode",
+                    )
+                self.turboquant = False
+                self.turboquant_config = None
+                self.key_cache = None
+                self.value_cache = None
+                self.key_scale_cache = None
+                self.value_scale_cache = None
+                self.key_zero_cache = None
+                self._shape = None
+                self._dtypes = None
+                self._ensure_allocated(keys, values)
+                flat_k = self.key_cache.reshape(
+                    -1, int(keys.shape[1]), int(keys.shape[3])
+                )
+                flat_v = self.value_cache.reshape(
+                    -1, int(values.shape[1]), int(values.shape[3])
+                )
+                flat_k[slot_mapping] = k_3d
+                flat_v[slot_mapping] = v_3d
+                self.key_cache = flat_k.reshape(self.key_cache.shape)
+                self.value_cache = flat_v.reshape(self.value_cache.shape)
+                self.offset += steps
+                self.update_calls += 1
+                self.cache_write_time_s += time.perf_counter() - started
+                return
+            (
+                self.key_cache,
+                self.value_cache,
+                self.key_scale_cache,
+                self.value_scale_cache,
+                self.key_zero_cache,
+            ) = ops.tq_encode(
+                k_3d,
+                v_3d,
+                self.key_cache,
+                self.value_cache,
+                self.key_scale_cache,
+                self.value_scale_cache,
+                self.key_zero_cache,
+                slot_mapping,
+                self._turboquant_v_centroids,
+                int(cfg.value_bits),
+                int(cfg.key_bits),
+                bool(cfg.key_signed),
+            )
+        elif self.kv_quant:
+            if self.key_scale_cache is None or self.value_scale_cache is None:
+                raise RuntimeError("paged KV quantization scale caches were not allocated")
+            from .kv_quant import quantize_symmetric
+
+            bits = int(self.kv_quant_config.bits)
+            qk, k_scale = quantize_symmetric(k_3d, bits=bits)
+            qv, v_scale = quantize_symmetric(v_3d, bits=bits)
+            flat_k = self.key_cache.reshape(
+                -1,
+                int(self.key_cache.shape[2]),
+                int(self.key_cache.shape[3]),
+            )
+            flat_v = self.value_cache.reshape(
+                -1,
+                int(self.value_cache.shape[2]),
+                int(self.value_cache.shape[3]),
+            )
+            flat_ks = self.key_scale_cache.reshape(
+                -1,
+                int(self.key_scale_cache.shape[2]),
+                int(self.key_scale_cache.shape[3]),
+            )
+            flat_vs = self.value_scale_cache.reshape(
+                -1,
+                int(self.value_scale_cache.shape[2]),
+                int(self.value_scale_cache.shape[3]),
+            )
+            flat_k[slot_mapping] = qk
+            flat_v[slot_mapping] = qv
+            flat_ks[slot_mapping] = k_scale
+            flat_vs[slot_mapping] = v_scale
+            self.key_cache = flat_k.reshape(self.key_cache.shape)
+            self.value_cache = flat_v.reshape(self.value_cache.shape)
+            self.key_scale_cache = flat_ks.reshape(self.key_scale_cache.shape)
+            self.value_scale_cache = flat_vs.reshape(self.value_scale_cache.shape)
+        else:
+            flat_k = self.key_cache.reshape(-1, int(keys.shape[1]), int(keys.shape[3]))
+            flat_v = self.value_cache.reshape(-1, int(values.shape[1]), int(values.shape[3]))
+            flat_k[slot_mapping] = k_3d
+            flat_v[slot_mapping] = v_3d
+            self.key_cache = flat_k.reshape(self.key_cache.shape)
+            self.value_cache = flat_v.reshape(self.value_cache.shape)
+        self.offset += steps
+        self.update_calls += 1
+        if self.kv_quant:
+            phase = current_attention_phase()
+            if phase == "prefill" or (phase == "unknown" and steps > 1):
+                # A new prompt is being written: the per-request numerics
+                # route re-latches at this request's first attention call.
+                # Decode/verify appends (single-token steps, decode phases)
+                # stay inside the current request's latched route.
+                self._reset_kv_quant_route()
+        self.cache_write_time_s += time.perf_counter() - started
+
+    def _load_contiguous_state(self, keys: Any, values: Any, offset: int) -> None:
+        self._invalidate_dequant_memo()
+        self._invalidate_quant_bank()
+        self._reset_kv_quant_route()
+        self.key_cache = None
+        self.value_cache = None
+        self.key_scale_cache = None
+        self.value_scale_cache = None
+        self.key_zero_cache = None
+        self._shape = None
+        self._dtypes = None
+        self.offset = 0
+        total = min(int(offset), int(keys.shape[2]))
+        if total <= 0:
+            return
+        self._write_tail(keys[..., :total, :], values[..., :total, :])
+
+    def _partition_threshold(self) -> int:
+        return _env_int("MTPLX_VLLM_METAL_PAGED_PARTITION_THRESHOLD", 2048)
+
+    def _partitioned_attention_enabled(self) -> bool:
+        return _env_truthy("MTPLX_VLLM_METAL_PAGED_PARTITIONED_ATTN")
+
+    @staticmethod
+    def _safe_2pass_paged_q_len(*, query_heads: int, kv_heads: int) -> int:
+        """Max q_len that keeps the packaged paged-tail Metal threadgroup legal."""
+
+        query_heads = max(1, int(query_heads))
+        kv_heads = max(1, int(kv_heads))
+        if query_heads % kv_heads:
+            return 0
+        gqa_factor = max(1, query_heads // kv_heads)
+        return max(1, 1024 // max(1, 32 * gqa_factor))
+
+    @staticmethod
+    def _kv_quant_kernel_enabled() -> bool:
+        """Master kill-switch for the inline-dequant kv_quant kernels (default on).
+
+        MTPLX_KV_QUANT_2PASS_KERNEL=0 restores the dequant-fallback dispatch
+        for one release in case a field regression needs the old path. Gates
+        both the q8 paged two-pass route and the q4 packed-quant route.
+        """
+        raw = os.environ.get("MTPLX_KV_QUANT_2PASS_KERNEL")
+        if raw is None or not raw.strip():
+            return True
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _kv_quant_q4_kernel_enabled() -> bool:
+        """Kill-switch for the q4 packed-quant kernel route (default on).
+
+        MTPLX_KV_QUANT_Q4_KERNEL=0 restores the chunked-dequant dispatch for
+        one release in case a field regression needs the old q4 path. The
+        master MTPLX_KV_QUANT_2PASS_KERNEL switch gates this route too.
+        """
+        raw = os.environ.get("MTPLX_KV_QUANT_Q4_KERNEL")
+        if raw is None or not raw.strip():
+            return True
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _packed_quant_safe_q_len(self, *, query_heads: int) -> int:
+        """Max q_len the packed-quant kernel accepts for this cache's geometry.
+
+        Zero means the geometry can never route (the packed-quant kernel's
+        own gates, mirrored host-side so the route latch never picks a lane
+        that bails every call): equal K/V head dims in {64, 128, 256}, GQA
+        factor dividing evenly with a legal 32-wide threadgroup. The kernel
+        itself caps QL at 8 (two float4 query banks).
+        """
+        if self._shape is None:
+            return 0
+        kv_heads, k_dim, v_dim = (int(x) for x in self._shape)
+        return self._packed_quant_safe_q_len_for(
+            query_heads=query_heads, kv_heads=kv_heads, k_dim=k_dim, v_dim=v_dim
+        )
+
+    @staticmethod
+    def _packed_quant_safe_q_len_for(
+        *, query_heads: int, kv_heads: int, k_dim: int, v_dim: int
+    ) -> int:
+        k_dim, v_dim = int(k_dim), int(v_dim)
+        if k_dim != v_dim or k_dim not in (64, 128, 256):
+            return 0
+        query_heads, kv_heads = int(query_heads), int(kv_heads)
+        if kv_heads <= 0 or query_heads <= 0 or query_heads % kv_heads:
+            return 0
+        if 32 * (query_heads // kv_heads) > 1024:
+            return 0
+        return 8
+
+    def _reset_kv_quant_route(self) -> None:
+        self._kv_quant_route = None
+        self._kv_quant_route_offset = -1
+
+    def _kv_quant_route_decision(self, queries: Any, *, sliding_window: int) -> str:
+        """Choose this request's kv_quant numerics path, once.
+
+        Latched at the request's first attention call and held until a new
+        prompt write or a buffer reload resets it: a request must not hop
+        between kernel math and dequant math because its offset crossed the
+        two-pass threshold mid-generation (temp-0 exactness — one request,
+        one math path). trim() deliberately does NOT reset the route:
+        speculative-verify rejections retract rows mid-request, and
+        re-latching there would reintroduce the switch at the threshold
+        boundary. Structural no-gos (kill-switches, sliding window, GQA
+        shapes the kernels refuse) latch "dequant"; otherwise the starting
+        offset decides: below the threshold the memoized dequant path is
+        cheap and the kernel has no KV-bandwidth advantage to harvest.
+        q8 routes to the paged two-pass q8 kernel; q4 routes to the
+        packed-quant bank kernel (kernels/sdpa_gqa_packed_quant).
+        """
+        if (
+            not self.kv_quant
+            or self.turboquant
+            or not self._kv_quant_kernel_enabled()
+            or int(sliding_window) > 0
+            or self.key_cache is None
+        ):
+            return "dequant"
+        bits = int(self.kv_quant_config.bits)
+        if bits == 8:
+            if (
+                self._safe_2pass_paged_q_len(
+                    query_heads=int(queries.shape[1]),
+                    kv_heads=int(self.key_cache.shape[2]),
+                )
+                < 1
+            ):
+                return "dequant"
+        elif bits == 4:
+            if not self._kv_quant_q4_kernel_enabled():
+                return "dequant"
+            if self._packed_quant_safe_q_len(query_heads=int(queries.shape[1])) < 1:
+                return "dequant"
+        else:
+            return "dequant"
+        two_pass_threshold = int(
+            os.environ.get(
+                "MTPLX_VLLM_METAL_PAGED_ATTN_2PASS_THRESHOLD",
+                "1024",
+            )
+            or "1024"
+        )
+        return "kernel" if int(self.offset) >= two_pass_threshold else "dequant"
+
+    def _kv_quant_2pass_attention(
+        self,
+        queries: Any,
+        *,
+        scale: float,
+        mask: Any | None,
+        sliding_window: int,
+        q_len: int,
+    ) -> Any | None:
+        """Decode/verify attention reading quantized pages directly (no dequant).
+
+        This is the lane that makes kv_quant an actual memory feature during
+        decode: no bf16 materialization at all. q8 dispatches the paged
+        two-pass q8 kernel over the token-major pages; q4 dispatches the
+        packed-quant GQA kernel (kernels/sdpa_gqa_packed_quant) over the
+        persistent head-major quant bank — the lane that kills the
+        full-prefix-dequant-every-round halving. Only requests routed
+        "kernel" (see _kv_quant_route_decision — the offset-vs-threshold
+        call happens once per request, not per call) dispatch here;
+        per-call eligibility mirrors each kernel's contract (causal,
+        batch 1, no window, q_len within the threadgroup budget); anything
+        else falls back for that call. The kernels' closed-lane verdicts
+        (~0.8x June, 0.61-0.78x v5) were measured against the DENSE kernel
+        on unquantized caches — irrelevant here, where the alternative is
+        the dequant fallback.
+        """
+        if (
+            not self.kv_quant
+            or self.turboquant
+            or not self._kv_quant_kernel_enabled()
+        ):
+            return None
+        if mask is not None and not (isinstance(mask, str) and mask == "causal"):
+            return None
+        if int(sliding_window) > 0:
+            return None
+        if (
+            self.key_cache is None
+            or self.value_cache is None
+            or self.key_scale_cache is None
+            or self.value_scale_cache is None
+        ):
+            return None
+        bits = int(self.kv_quant_config.bits)
+        if bits == 4:
+            if not self._kv_quant_q4_kernel_enabled():
+                return None
+            safe_q = self._packed_quant_safe_q_len(
+                query_heads=int(queries.shape[1])
+            )
+            if safe_q < 1 or q_len > safe_q:
+                # Bail BEFORE touching the bank: prefill-width bursts must
+                # not build (or extend) the bank they cannot consume.
+                return None
+            from .kernels.sdpa_gqa_packed_quant import sdpa_gqa_packed_tail_quant
+
+            bank_k, bank_v, bank_ks, bank_vs = self._quant_bank_arrays()
+            return sdpa_gqa_packed_tail_quant(
+                queries=queries,
+                k_q=bank_k,
+                k_scale=bank_ks,
+                v_q=bank_v,
+                v_scale=bank_vs,
+                offset=int(self.offset),
+                scale=float(scale),
+                bits=4,
+                max_q_len=safe_q,
+            )
+        if bits != 8:
+            return None
+        safe_q = self._safe_2pass_paged_q_len(
+            query_heads=int(queries.shape[1]),
+            kv_heads=int(self.key_cache.shape[2]),
+        )
+        if q_len > safe_q:
+            return None
+        from .kernels.sdpa_2pass_paged_q8 import sdpa_2pass_paged_q8_tail
+
+        return sdpa_2pass_paged_q8_tail(
+            queries=queries,
+            key_q=self.key_cache,
+            key_scales=self.key_scale_cache[..., 0],
+            value_q=self.value_cache,
+            value_scales=self.value_scale_cache[..., 0],
+            offset=int(self.offset),
+            block_size=int(self.block_size),
+            scale=float(scale),
+            max_q_len=safe_q,
+        )
+
+    def _long_context_dense_fallback_forbidden(self) -> bool:
+        if _env_truthy("MTPLX_ALLOW_LONG_CONTEXT_DENSE_FALLBACK"):
+            return False
+        if _env_truthy("MTPLX_ALLOW_PAGED_ACTIVE_ARRAY_SNAPSHOT"):
+            return False
+        # Only the QA assertion env var should turn the dense-fallback path
+        # into a hard error. MTPLX_SUSTAINED_PREFILL is a *product* profile
+        # flag (set by `--profile sustained`) and must not abort production
+        # requests when the partitioned
+
+Using the code above as the style reference, write a new Python class `RingKVCache` for mlx_lm: a fixed-capacity rotating key/value cache with update_and_fetch, trim, is_trimmable, state and meta_state, matching the conventions of the cache classes above, with docstrings and a short usage example.

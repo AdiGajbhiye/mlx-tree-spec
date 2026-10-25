@@ -1,0 +1,383 @@
+[
+  {
+    "prompt": "Write a Python function that returns the n-th Fibonacci number iteratively, with a docstring.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 24.377439075008997
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 121.66792048486658,
+      "diverges_at": null,
+      "steps": 31,
+      "decode_s": 1.6355995829217136,
+      "prefill_s": 0.07479145901743323,
+      "tokens_per_step": 6.645161290322581,
+      "mean_rows": 1.0,
+      "mean_nodes": 7.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.0,
+      "depth_hist": {
+        "7": 31
+      },
+      "draft_s": 0.0,
+      "verify_s": 1.6355995829217136,
+      "spec_hit_rate": null
+    },
+    "fork d15 +0x0 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 125.25193316460116,
+      "diverges_at": null,
+      "steps": 29,
+      "decode_s": 1.5887978330720216,
+      "prefill_s": 0.07321445900015533,
+      "tokens_per_step": 6.9655172413793105,
+      "mean_rows": 1.0,
+      "mean_nodes": 7.275862068965517,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.275862068965516,
+      "draft_s": 0.0,
+      "verify_s": 1.5887978330720216,
+      "alt_win_rate": 0.0,
+      "sib_win_rate": 0.0,
+      "shape_hist": {
+        "7": 28,
+        "11/s4": 1
+      }
+    },
+    "fork d15 +1x3 s3 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 120.54429685434272,
+      "diverges_at": null,
+      "steps": 30,
+      "decode_s": 1.6508454169379547,
+      "prefill_s": 0.07347766601014882,
+      "tokens_per_step": 6.633333333333334,
+      "mean_rows": 1.0333333333333334,
+      "mean_nodes": 7.533333333333333,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.533333333333333,
+      "draft_s": 0.0,
+      "verify_s": 1.6508454169379547,
+      "alt_win_rate": 0.0,
+      "sib_win_rate": 0.0,
+      "shape_hist": {
+        "7+0": 26,
+        "4+3": 1,
+        "6+0/s1": 1,
+        "12+0/s3": 1
+      }
+    },
+    "fork d15 +2x4 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 124.73801358327137,
+      "diverges_at": null,
+      "steps": 29,
+      "decode_s": 1.5953436669660732,
+      "prefill_s": 0.07327633304521441,
+      "tokens_per_step": 6.9655172413793105,
+      "mean_rows": 1.0689655172413792,
+      "mean_nodes": 7.551724137931035,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.551724137931036,
+      "draft_s": 0.0,
+      "verify_s": 1.5953436669660732,
+      "alt_win_rate": 0.0,
+      "sib_win_rate": 0.0,
+      "shape_hist": {
+        "7+0+0": 27,
+        "6+4+4/s1": 1,
+        "11+0+0/s4": 1
+      }
+    }
+  },
+  {
+    "prompt": "Explain in three short paragraphs why the sky is blue.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 24.35839460740345
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 55.08819278809959,
+      "diverges_at": null,
+      "steps": 72,
+      "decode_s": 3.612389332964085,
+      "prefill_s": 0.07970275008119643,
+      "tokens_per_step": 2.7777777777777777,
+      "mean_rows": 1.0,
+      "mean_nodes": 5.416666666666667,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 6.416666666666667,
+      "depth_hist": {
+        "4": 28,
+        "5": 9,
+        "6": 12,
+        "7": 23
+      },
+      "draft_s": 0.0,
+      "verify_s": 3.612389332964085,
+      "spec_hit_rate": null
+    },
+    "fork d15 +0x0 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 57.52945882423387,
+      "diverges_at": null,
+      "steps": 67,
+      "decode_s": 3.459097374929115,
+      "prefill_s": 0.07934816705528647,
+      "tokens_per_step": 2.970149253731343,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.880597014925373,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.880597014925373,
+      "draft_s": 0.0,
+      "verify_s": 3.459097374929115,
+      "alt_win_rate": 0.0,
+      "sib_win_rate": 0.1791044776119403,
+      "shape_hist": {
+        "5/s2": 27,
+        "4/s3": 21,
+        "6/s1": 10,
+        "7": 4
+      }
+    },
+    "fork d15 +1x3 s3 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 58.944138666735434,
+      "diverges_at": 115,
+      "steps": 64,
+      "decode_s": 3.3760778340511024,
+      "prefill_s": 0.0789382909424603,
+      "tokens_per_step": 3.109375,
+      "mean_rows": 1.5,
+      "mean_nodes": 6.875,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.875,
+      "draft_s": 0.0,
+      "verify_s": 3.3760778340511024,
+      "alt_win_rate": 0.109375,
+      "sib_win_rate": 0.078125,
+      "shape_hist": {
+        "5+0/s2": 16,
+        "4+3": 12,
+        "3+3": 8,
+        "6+0/s1": 6
+      }
+    },
+    "fork d15 +2x4 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 60.210547812942856,
+      "diverges_at": 162,
+      "steps": 62,
+      "decode_s": 3.30506875005085,
+      "prefill_s": 0.07725774997379631,
+      "tokens_per_step": 3.2096774193548385,
+      "mean_rows": 1.8064516129032258,
+      "mean_nodes": 8.806451612903226,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 9.806451612903226,
+      "draft_s": 0.0,
+      "verify_s": 3.30506875005085,
+      "alt_win_rate": 0.16129032258064516,
+      "sib_win_rate": 0.11290322580645161,
+      "shape_hist": {
+        "4+0+0/s3": 12,
+        "6+0+0/s1": 9,
+        "4+4+4/s3": 8,
+        "3+3+1": 7
+      }
+    }
+  },
+  {
+    "prompt": "A train leaves at 9:40 and arrives at 13:05. It stops twice for 12 minutes each. How long was it moving? Show your steps.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 24.303631621521966
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 104.91484074006266,
+      "diverges_at": null,
+      "steps": 36,
+      "decode_s": 1.89677645789925,
+      "prefill_s": 0.14055125007871538,
+      "tokens_per_step": 5.555555555555555,
+      "mean_rows": 1.0,
+      "mean_nodes": 7.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.0,
+      "depth_hist": {
+        "7": 36
+      },
+      "draft_s": 0.0,
+      "verify_s": 1.89677645789925,
+      "spec_hit_rate": null
+    },
+    "fork d15 +0x0 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 97.96843896696019,
+      "diverges_at": null,
+      "steps": 38,
+      "decode_s": 2.0312664170050994,
+      "prefill_s": 0.13597508310340345,
+      "tokens_per_step": 5.2631578947368425,
+      "mean_rows": 1.0,
+      "mean_nodes": 7.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.0,
+      "draft_s": 0.0,
+      "verify_s": 2.0312664170050994,
+      "alt_win_rate": 0.0,
+      "sib_win_rate": 0.10526315789473684,
+      "shape_hist": {
+        "7": 22,
+        "5/s2": 12,
+        "6/s1": 4
+      }
+    },
+    "fork d15 +1x3 s3 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 99.61344726175294,
+      "diverges_at": null,
+      "steps": 37,
+      "decode_s": 1.9977222500601783,
+      "prefill_s": 0.1360870829084888,
+      "tokens_per_step": 5.405405405405405,
+      "mean_rows": 1.1081081081081081,
+      "mean_nodes": 7.405405405405405,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.405405405405405,
+      "draft_s": 0.0,
+      "verify_s": 1.9977222500601783,
+      "alt_win_rate": 0.02702702702702703,
+      "sib_win_rate": 0.10810810810810811,
+      "shape_hist": {
+        "7+0": 19,
+        "5+0/s2": 10,
+        "6+0/s1": 4,
+        "8+3/s3": 1
+      }
+    },
+    "fork d15 +2x4 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 92.96295719647307,
+      "diverges_at": null,
+      "steps": 39,
+      "decode_s": 2.1406375829828903,
+      "prefill_s": 0.13269179197959602,
+      "tokens_per_step": 5.256410256410256,
+      "mean_rows": 1.205128205128205,
+      "mean_nodes": 8.23076923076923,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 9.23076923076923,
+      "draft_s": 0.0,
+      "verify_s": 2.1406375829828903,
+      "alt_win_rate": 0.02564102564102564,
+      "sib_win_rate": 0.15384615384615385,
+      "shape_hist": {
+        "7+0+0": 16,
+        "5+0+0/s2": 12,
+        "6+0+0/s1": 4,
+        "7+4+0/s4": 3
+      }
+    }
+  },
+  {
+    "prompt": "List ten interesting facts about octopuses, one sentence each.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 24.271669751295583
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 50.40435671792593,
+      "diverges_at": 125,
+      "steps": 77,
+      "decode_s": 3.948071416001767,
+      "prefill_s": 0.0783383339876309,
+      "tokens_per_step": 2.5844155844155843,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.077922077922078,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.077922077922078,
+      "depth_hist": {
+        "5": 16,
+        "6": 39,
+        "7": 22
+      },
+      "draft_s": 0.0,
+      "verify_s": 3.948071416001767,
+      "spec_hit_rate": null
+    },
+    "fork d15 +0x0 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 50.42513104939236,
+      "diverges_at": 167,
+      "steps": 76,
+      "decode_s": 3.9464448749786243,
+      "prefill_s": 0.07559183402918279,
+      "tokens_per_step": 2.6447368421052633,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.526315789473684,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.526315789473684,
+      "draft_s": 0.0,
+      "verify_s": 3.9464448749786243,
+      "alt_win_rate": 0.0,
+      "sib_win_rate": 0.039473684210526314,
+      "shape_hist": {
+        "5/s2": 27,
+        "5/s1": 18,
+        "6/s1": 14,
+        "7": 8
+      }
+    },
+    "fork d15 +1x3 s3 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 54.9400990192532,
+      "diverges_at": 167,
+      "steps": 70,
+      "decode_s": 3.622126708040014,
+      "prefill_s": 0.0759754590690136,
+      "tokens_per_step": 2.8714285714285714,
+      "mean_rows": 1.6571428571428573,
+      "mean_nodes": 6.9714285714285715,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.9714285714285715,
+      "draft_s": 0.0,
+      "verify_s": 3.622126708040014,
+      "alt_win_rate": 0.17142857142857143,
+      "sib_win_rate": 0.04285714285714286,
+      "shape_hist": {
+        "4+3": 27,
+        "3+3/s1": 12,
+        "5+0/s2": 11,
+        "6+0/s1": 7
+      }
+    },
+    "fork d15 +2x4 s4 [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 57.045787161892136,
+      "diverges_at": 9,
+      "steps": 64,
+      "decode_s": 3.488425875082612,
+      "prefill_s": 0.0764452499570325,
+      "tokens_per_step": 3.15625,
+      "mean_rows": 1.828125,
+      "mean_nodes": 8.875,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 9.875,
+      "draft_s": 0.0,
+      "verify_s": 3.488425875082612,
+      "alt_win_rate": 0.15625,
+      "sib_win_rate": 0.015625,
+      "shape_hist": {
+        "4+3+0": 14,
+        "7+0+0": 11,
+        "6+0+0/s1": 10,
+        "4+4+4/s3": 9
+      }
+    }
+  }
+]

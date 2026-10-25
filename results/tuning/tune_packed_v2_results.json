@@ -1,0 +1,124 @@
+[
+  {
+    "prompt": "Write a Python function that returns the n-th Fibonacci number iteratively, with a docstring.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 24.451462464788683
+    },
+    "chain d3 k1 w1 b3 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 81.58552793539484,
+      "diverges_at": null,
+      "steps": 52,
+      "decode_s": 2.4391580839874223,
+      "prefill_s": 0.27055512508377433,
+      "tokens_per_step": 3.8461538461538463,
+      "mean_rows": 1.0,
+      "mean_nodes": 3.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 4.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 2.4391580839874223,
+      "spec_hit_rate": null
+    },
+    "chain d6 k1 w1 b6 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 117.21176764909931,
+      "diverges_at": null,
+      "steps": 33,
+      "decode_s": 1.6977817500010133,
+      "prefill_s": 0.07311720808502287,
+      "tokens_per_step": 6.090909090909091,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 1.6977817500010133,
+      "spec_hit_rate": null
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 121.64118097943759,
+      "diverges_at": null,
+      "steps": 31,
+      "decode_s": 1.6359591250075027,
+      "prefill_s": 0.07314562506508082,
+      "tokens_per_step": 6.645161290322581,
+      "mean_rows": 1.0,
+      "mean_nodes": 7.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 8.0,
+      "depth_hist": {
+        "7": 31
+      },
+      "draft_s": 0.0,
+      "verify_s": 1.6359591250075027,
+      "spec_hit_rate": null
+    }
+  },
+  {
+    "prompt": "Explain in three short paragraphs why the sky is blue.",
+    "ar": {
+      "tokens": 200,
+      "tok_s": 24.39310406645121
+    },
+    "chain d3 k1 w1 b3 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 54.48087641958572,
+      "diverges_at": 162,
+      "steps": 78,
+      "decode_s": 3.6526578329503536,
+      "prefill_s": 0.07930166705045849,
+      "tokens_per_step": 2.5641025641025643,
+      "mean_rows": 1.0,
+      "mean_nodes": 3.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 4.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 3.6526578329503536,
+      "spec_hit_rate": null
+    },
+    "chain d6 k1 w1 b6 lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 54.72348523825366,
+      "diverges_at": 162,
+      "steps": 71,
+      "decode_s": 3.6364642919506878,
+      "prefill_s": 0.07790070807095617,
+      "tokens_per_step": 2.816901408450704,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.0,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.0,
+      "depth_hist": null,
+      "draft_s": 0.0,
+      "verify_s": 3.6364642919506878,
+      "spec_hit_rate": null
+    },
+    "adapt d15 k1 w1 b15 auto lazy [general_vocab 64k]": {
+      "tokens": 200,
+      "tok_s": 54.716537455018624,
+      "diverges_at": 162,
+      "steps": 71,
+      "decode_s": 3.636926042032428,
+      "prefill_s": 0.07839899999089539,
+      "tokens_per_step": 2.816901408450704,
+      "mean_rows": 1.0,
+      "mean_nodes": 6.028169014084507,
+      "passes_per_step": 1.0,
+      "verify_tokens_per_step": 7.028169014084507,
+      "depth_hist": {
+        "4": 18,
+        "6": 15,
+        "7": 38
+      },
+      "draft_s": 0.0,
+      "verify_s": 3.636926042032428,
+      "spec_hit_rate": null
+    }
+  }
+]

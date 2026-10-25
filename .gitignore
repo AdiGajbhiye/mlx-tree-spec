@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Run logs and live server output (traces hold full prompts and replies)
+runs/
+*.log
+*.out
+*.jsonl
+!bench/runtimes/results.jsonl
+!bench/runtimes/results-base.jsonl
+
+# Separate research (base Qwen stop-thinking probe); not part of the release
+base_traces/
+
+# Runtime comparison scratch: agent-session replays need captured requests that stay local
+bench/runtimes/rw/
+bench/runtimes/logs/
+bench/runtimes/logs-dl/

@@ -1,0 +1,302 @@
+<title>Qwen3.8 27B on M5 Max</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column of findings, then wide data panels (charts + heat tables) that scroll sideways on phones. */
+:root {
+  --bg: #f6f7f8;
+  --surface: #fdfdfd;
+  --ink: #101418;
+  --ink-2: #4a525b;
+  --muted: #7f8790;
+  --rule: #dfe3e7;
+  --axis: #c2c8ce;
+  --heat: #2a78d6;
+  --neg: #d03b3b;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
+  --warn-bg: #fff4e0; --warn-ink: #7a4b00;
+  --f-display: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --f-data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1215; --surface: #171b1f; --ink: #eef1f4; --ink-2: #b9c0c7; --muted: #848c95;
+    --rule: #2a3036; --axis: #3a4148; --heat: #3987e5; --neg: #e66767;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
+    --warn-bg: #2e2412; --warn-ink: #f2c46b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1215; --surface: #171b1f; --ink: #eef1f4; --ink-2: #b9c0c7; --muted: #848c95;
+  --rule: #2a3036; --axis: #3a4148; --heat: #3987e5; --neg: #e66767;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
+  --warn-bg: #2e2412; --warn-ink: #f2c46b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 1120px; margin: 0 auto; padding-block: 40px 72px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 48px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(28px, 4.2vw, 42px); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+h3 { font-size: 15px; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font-family: var(--f-data); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: 16px; }
+.lede { color: var(--ink-2); font-size: 17px; }
+.specs { display: flex; flex-wrap: wrap; gap: 8px; }
+.spec { font-family: var(--f-data); font-size: 12.5px; padding: 4px 10px; border: 1px solid var(--rule); border-radius: 999px; color: var(--ink-2); background: var(--surface); }
+section { display: grid; gap: 16px; min-width: 0; }
+.findings { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px 32px; padding: 0; margin: 0; list-style: none; }
+.findings li { display: grid; gap: 4px; padding-top: 12px; border-top: 2px solid var(--ink); min-width: 0; }
+.findings b { font-family: var(--f-display); font-size: 16px; }
+.findings span { color: var(--ink-2); }
+.num { font-family: var(--f-data); font-variant-numeric: tabular-nums; }
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 20px; display: grid; gap: 14px; min-width: 0; }
+.panel .sub { color: var(--ink-2); font-size: 14px; }
+.scroll { overflow-x: auto; min-width: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); }
+.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; min-width: 560px; }
+.chart text { font-family: var(--f-data); font-size: 11px; fill: var(--muted); }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 190px; }
+.tip .row { display: flex; justify-content: space-between; gap: 14px; }
+.tip .row span:first-child::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--c); }
+table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13.5px; }
+th, td { padding: 7px 10px; text-align: right; white-space: nowrap; }
+th { font-family: var(--f-data); font-weight: 500; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--axis); }
+td { font-family: var(--f-data); font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--rule); }
+th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--surface); }
+td:first-child { font-family: var(--f-body); }
+td:first-child .id { font-family: var(--f-data); font-size: 12px; color: var(--muted); margin-right: 8px; }
+td:first-child .what { color: var(--ink); }
+td:first-child .how { color: var(--muted); font-size: 12.5px; }
+tr.group td { font-family: var(--f-data); font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding-top: 16px; border-bottom: 1px solid var(--axis); }
+td.na { color: var(--muted); }
+.note { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 12px 14px; font-size: 14px; }
+.method { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 32px; }
+.method div { display: grid; gap: 6px; min-width: 0; }
+.method p { color: var(--ink-2); font-size: 14px; }
+code { font-family: var(--f-data); font-size: 12.5px; }
+.cmd { font-family: var(--f-data); font-size: 12px; color: var(--ink-2); white-space: pre; }
+footer { color: var(--muted); font-size: 13px; }
+@media (max-width: 520px) { .panel { padding: 14px; } body { font-size: 14.5px; } }
+</style>
+
+<div class="page">
+<header>
+  <div class="eyebrow">Local inference benchmark · 17 Oct 2026</div>
+  <h1>Qwen3.8 27B on a 32‑core M5 Max</h1>
+  <p class="lede">Prefill and decode speed for Qwen3.8 27B and its Swift 1.5 fine-tune across five engines, with and without draft models, from a 128-token prompt to 32k tokens of context.</p>
+  <div class="specs">
+    <span class="spec">MacBook Pro Mac17,6</span><span class="spec">M5 Max · 32-core GPU</span><span class="spec">36 GB unified</span><span class="spec">macOS 26.6.2</span><span class="spec">temperature 0 · 512 output tokens</span>
+  </div>
+</header>
+
+__FINDINGS__
+
+<section>
+  <h2>Decode speed as context grows</h2>
+  <div class="panel">
+    <p class="sub">Generation speed after a prompt of the given length (the summarize-and-write-tests task). Each point is the median of 3 runs (2 at 32k). Hover for values.</p>
+    <div class="legend" id="leg-decode"></div>
+    <div class="scroll"><div class="chart" id="chart-decode"></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Prefill speed as context grows</h2>
+  <div class="panel">
+    <p class="sub">Prompt tokens divided by time to first token, for each engine without a draft. Drafts don't change prefill (see the table below). Lithos is left off: it prefills at about 3 tok/s on this chip.</p>
+    <div class="legend" id="leg-prefill"></div>
+    <div class="scroll"><div class="chart" id="chart-prefill"></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>All configurations</h2>
+  <div class="panel">
+    <h3>Decode tok/s by context length</h3>
+    <div class="scroll"><table id="t-decode"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Prefill tok/s by context length</h3>
+    <div class="scroll"><table id="t-prefill"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Time to first token (seconds)</h3>
+    <div class="scroll"><table id="t-ttft"></table></div>
+  </div>
+</section>
+
+<section>
+  <h2>Task mix: what the draft is good at</h2>
+  <div class="panel">
+    <h3>Decode tok/s by task, short prompt</h3>
+    <p class="sub">Six kinds of output. Without a draft every task decodes at the same speed. With a draft, speed depends on how predictable the text is. The edit task rewrites a 250-line file with small changes, so most of the output can be copied from the prompt.</p>
+    <div class="scroll"><table id="t-tasks"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Speedup over the same engine without a draft</h3>
+    <p class="sub">Blue is faster, red is slower than the no-draft run on the same engine and weights.</p>
+    <div class="scroll"><table id="t-speedup"></table></div>
+  </div>
+  <div class="panel">
+    <h3>Draft acceptance</h3>
+    <p class="sub">Share of drafted tokens the target accepted (MTP engines), or mean tokens committed per target pass (mlx-dspark). Lithos doesn't report it.</p>
+    <div class="scroll"><table id="t-accept"></table></div>
+  </div>
+</section>
+
+__NOTES__
+
+<footer>Raw data: <code>bench/runtimes/results.jsonl</code> · scripts: <code>bench.py</code>, <code>run_all.sh</code>, <code>summarize.py</code> · server logs in <code>logs/</code></footer>
+</div>
+
+<script>
+const D = __DATA__;
+const S = D.summary, N = D.names;
+const GROUPS = [
+  ["Lithos Metal 0.1.2 · nvidia Qwen3.8-27B NVFP4", ["A1", "A2"]],
+  ["mlx-dspark 0.20.3 · mlx-community Qwen3.8-27B 4-bit", ["B1", "B2", "B3"]],
+  ["MTPLX 2.12.2 · Swift 1.5 4-bit (ukisai)", ["C1", "C2", "C2n"]],
+  ["mlx-lm 0.32 (ukisai patched) · Swift 1.5 4-bit", ["C3"]],
+  ["llama.cpp b11429 · Swift 1.5 IQ3_S GGUF", ["D1", "D2"]],
+  ["MTPLX 2.12.2 · Swift 1.5 AX MXFP4", ["E1", "E2", "E2n"]],
+].map(([g, ids]) => [g, ids.filter(i => S[i])]).filter(([, ids]) => ids.length);
+const DRAFT = { A1: "no draft", A2: "DSpark draft", B1: "no draft", B2: "DFlash2 draft", B3: "DSpark draft (RedHat)",
+  C1: "no MTP", C2: "MTP + context copy", C2n: "MTP only", C3: "no MTP", D1: "no MTP", D2: "MTP",
+  E1: "no MTP", E2: "MTP + context copy", E2n: "MTP only" };
+const BASE = { A2: "A1", B2: "B1", B3: "B1", C2: "C1", C2n: "C1", D2: "D1", E2: "E1", E2n: "E1" };
+const CTX = [128, 1024, 4096, 8192, 16384, 32768];
+const CTXL = c => c >= 1024 ? (c / 1024) + "k" : String(c);
+const TASKS = ["code", "prose", "math", "json", "edit", "creative"];
+const get = (id, sc, key, m) => (((S[id] || {})[sc] || {})[key] || {})[m];
+const fmt = (v, d = 1) => v == null ? "–" : Number(v).toFixed(d);
+
+function rowHead(id) {
+  return `<td><span class="id">${id}</span><span class="what">${DRAFT[id]}</span></td>`;
+}
+function heat(v, lo, hi) {
+  if (v == null) return "";
+  const t = hi > lo ? (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) : 0;
+  return `background: color-mix(in oklab, var(--heat) ${Math.round(6 + 44 * Math.max(0, Math.min(1, t)))}%, var(--surface))`;
+}
+function heatTable(el, cols, colLabel, val, digits, invert) {
+  const all = []; GROUPS.forEach(([, ids]) => ids.forEach(id => cols.forEach(c => { const v = val(id, c); if (v != null) all.push(v); })));
+  const lo = Math.min(...all), hi = Math.max(...all);
+  let h = `<thead><tr><th>Configuration</th>${cols.map(c => `<th>${colLabel(c)}</th>`).join("")}</tr></thead><tbody>`;
+  GROUPS.forEach(([g, ids]) => {
+    h += `<tr class="group"><td colspan="${cols.length + 1}">${g}</td></tr>`;
+    ids.forEach(id => {
+      h += `<tr>${rowHead(id)}${cols.map(c => {
+        const v = val(id, c);
+        const st = v == null ? "" : invert ? heat(hi + lo - v, lo, hi) : heat(v, lo, hi);
+        return `<td class="${v == null ? "na" : ""}" style="${st}">${fmt(v, digits)}</td>`;
+      }).join("")}</tr>`;
+    });
+  });
+  el.innerHTML = h + "</tbody>";
+}
+heatTable(document.getElementById("t-decode"), CTX, CTXL, (id, c) => get(id, "s1", `longctx@${c}`, "decode_tps"), 1);
+heatTable(document.getElementById("t-prefill"), CTX, CTXL, (id, c) => get(id, "s1", `longctx@${c}`, "prefill_tps"), 0);
+heatTable(document.getElementById("t-ttft"), CTX, CTXL, (id, c) => get(id, "s1", `longctx@${c}`, "ttft_s"), 1, true);
+heatTable(document.getElementById("t-tasks"), TASKS, t => t, (id, t) => get(id, "s2", `${t}@0`, "decode_tps"), 1);
+
+(function speedup() {
+  const el = document.getElementById("t-speedup");
+  let h = `<thead><tr><th>Configuration</th>${TASKS.map(t => `<th>${t}</th>`).join("")}<th>32k ctx</th></tr></thead><tbody>`;
+  GROUPS.forEach(([g, ids]) => {
+    const rows = ids.filter(id => BASE[id]);
+    if (!rows.length) return;
+    h += `<tr class="group"><td colspan="${TASKS.length + 2}">${g}</td></tr>`;
+    rows.forEach(id => {
+      const cells = TASKS.map(t => [get(id, "s2", `${t}@0`, "decode_tps"), get(BASE[id], "s2", `${t}@0`, "decode_tps")]);
+      cells.push([get(id, "s1", "longctx@32768", "decode_tps"), get(BASE[id], "s1", "longctx@32768", "decode_tps")]);
+      h += `<tr>${rowHead(id)}${cells.map(([a, b]) => {
+        if (a == null || b == null) return `<td class="na">–</td>`;
+        const r = a / b, t = Math.min(1, Math.abs(Math.log2(r)) / 2);
+        const col = r >= 1 ? "var(--heat)" : "var(--neg)";
+        return `<td style="background: color-mix(in oklab, ${col} ${Math.round(6 + 44 * t)}%, var(--surface))">${r.toFixed(2)}×</td>`;
+      }).join("")}</tr>`;
+    });
+  });
+  el.innerHTML = h + "</tbody>";
+})();
+
+(function accept() {
+  const el = document.getElementById("t-accept");
+  let h = `<thead><tr><th>Configuration</th>${TASKS.map(t => `<th>${t}</th>`).join("")}</tr></thead><tbody>`;
+  GROUPS.forEach(([g, ids]) => {
+    const rows = ids.filter(id => TASKS.some(t => get(id, "s2", `${t}@0`, "accept_rate") != null || (get(id, "s2", `${t}@0`, "accept_len") || 1) > 1));
+    if (!rows.length) return;
+    h += `<tr class="group"><td colspan="${TASKS.length + 1}">${g}</td></tr>`;
+    rows.forEach(id => {
+      h += `<tr>${rowHead(id)}${TASKS.map(t => {
+        const r = get(id, "s2", `${t}@0`, "accept_rate"), l = get(id, "s2", `${t}@0`, "accept_len");
+        return `<td>${r != null ? Math.round(r * 100) + "%" : l != null ? l.toFixed(2) + " tok" : "–"}</td>`;
+      }).join("")}</tr>`;
+    });
+  });
+  el.innerHTML = h + "</tbody>";
+})();
+
+function lineChart(host, legendEl, series, metric, yLabel) {
+  const W = 880, H = 340, m = { l: 52, r: 24, t: 14, b: 40 };
+  const xs = CTX.map((c, i) => m.l + i * (W - m.l - m.r) / (CTX.length - 1));
+  const vals = series.flatMap(s => CTX.map(c => get(s.id, "s1", `longctx@${c}`, metric)).filter(v => v != null));
+  const step = metric === "prefill_tps" ? 200 : 10;
+  const yMax = Math.ceil(Math.max(...vals) * 1.08 / step) * step;
+  const y = v => m.t + (H - m.t - m.b) * (1 - v / yMax);
+  let g = "";
+  for (let v = 0; v <= yMax; v += step) {
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(${v === 0 ? "--axis" : "--rule"})" stroke-width="1"/>`;
+    g += `<text x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  }
+  xs.forEach((x, i) => g += `<text x="${x}" y="${H - m.b + 18}" text-anchor="middle">${CTXL(CTX[i])}</text>`);
+  g += `<text x="${m.l}" y="${H - 4}" text-anchor="start">context tokens →</text>`;
+  g += `<text transform="translate(12 ${m.t + (H - m.t - m.b) / 2}) rotate(-90)" text-anchor="middle">${yLabel}</text>`;
+  series.forEach(s => {
+    const pts = CTX.map((c, i) => [xs[i], get(s.id, "s1", `longctx@${c}`, metric)]).filter(p => p[1] != null);
+    g += `<polyline fill="none" stroke="var(${s.c})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${pts.map(p => `${p[0]},${y(p[1])}`).join(" ")}"/>`;
+    pts.forEach(p => g += `<circle cx="${p[0]}" cy="${y(p[1])}" r="4" fill="var(${s.c})" stroke="var(--surface)" stroke-width="2"/>`);
+  });
+  g += `<line id="cross" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--axis)" stroke-width="1" visibility="hidden"/>`;
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${yLabel} by context length">${g}<rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"/></svg><div class="tip" hidden></div>`;
+  legendEl.innerHTML = series.map(s => `<span><i style="background: var(${s.c})"></i>${s.id} · ${s.label}</span>`).join("");
+  const svg = host.querySelector("svg"), tip = host.querySelector(".tip"), cross = host.querySelector("#cross");
+  const show = (evt) => {
+    const r = svg.getBoundingClientRect(), sx = (evt.clientX - r.left) * W / r.width;
+    let i = 0; xs.forEach((x, k) => { if (Math.abs(x - sx) < Math.abs(xs[i] - sx)) i = k; });
+    cross.setAttribute("x1", xs[i]); cross.setAttribute("x2", xs[i]); cross.setAttribute("visibility", "visible");
+    const rows = series.map(s => [s, get(s.id, "s1", `longctx@${CTX[i]}`, metric)]).filter(([, v]) => v != null).sort((a, b) => b[1] - a[1]);
+    tip.innerHTML = `<div class="eyebrow">${CTXL(CTX[i])} context</div>` + rows.map(([s, v]) => `<div class="row" style="--c: var(${s.c})"><span>${s.id} ${s.label}</span><span class="num">${v.toFixed(metric === "prefill_tps" ? 0 : 1)}</span></div>`).join("");
+    tip.hidden = false;
+    const px = xs[i] * r.width / W, hostW = host.clientWidth;
+    tip.style.left = Math.min(Math.max(0, px + 14), hostW - tip.offsetWidth - 4) + "px";
+    tip.style.top = "8px";
+  };
+  svg.addEventListener("pointermove", show);
+  svg.addEventListener("pointerleave", () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); });
+}
+lineChart(document.getElementById("chart-decode"), document.getElementById("leg-decode"), [
+  { id: "B3", c: "--s1", label: "mlx-dspark + DSpark (Qwen)" },
+  { id: "B2", c: "--s2", label: "mlx-dspark + DFlash2 (Qwen)" },
+  { id: "C2n", c: "--s3", label: "MTPLX + MTP (Swift 4-bit)" },
+  { id: "D2", c: "--s4", label: "llama.cpp + MTP (Swift IQ3_S)" },
+  { id: "D1", c: "--s5", label: "llama.cpp, no MTP (Swift IQ3_S)" },
+  { id: "B1", c: "--s6", label: "mlx-dspark, no draft (Qwen)" },
+].filter(s => S[s.id]), "decode_tps", "decode tok/s");
+lineChart(document.getElementById("chart-prefill"), document.getElementById("leg-prefill"), [
+  { id: "B1", c: "--s1", label: "mlx-dspark (Qwen 4-bit)" },
+  { id: "E1", c: "--s2", label: "MTPLX (Swift AX MXFP4)" },
+  { id: "C1", c: "--s3", label: "MTPLX (Swift 4-bit)" },
+  { id: "C3", c: "--s4", label: "mlx-lm (Swift 4-bit)" },
+  { id: "D1", c: "--s5", label: "llama.cpp (Swift IQ3_S)" },
+].filter(s => S[s.id]), "prefill_tps", "prefill tok/s");
+</script>

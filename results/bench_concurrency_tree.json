@@ -1,0 +1,357 @@
+{
+  "startedAt": "2026-10-24T18:14:28.045Z",
+  "config": {
+    "baseUrl": "http://127.0.0.1:8090",
+    "model": "swift-1.5-4bit-mtp",
+    "apiKey": "mtplx-local",
+    "timeoutMs": 600000
+  },
+  "maxTokens": 1024,
+  "limits": {
+    "serverBytes": 32212254720,
+    "freeBytes": 1610612736,
+    "swapGrowthBytes": 1073741824,
+    "deadlineMs": 1200000
+  },
+  "baseline": {
+    "serverFootprint": 16885034504,
+    "serverRss": 14922842112,
+    "free": 11894685696,
+    "swapUsed": 0
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "requests": 8,
+      "wallSeconds": 101.1,
+      "completionTokens": 4813,
+      "outputTokPerSec": 47.6,
+      "workPerSec": 1.293,
+      "steadyWorkPerSec": 1.39,
+      "meanLatencySeconds": 12.6,
+      "medianLatencySeconds": 11.8,
+      "medianRequestDecodeTokPerSec": 55.3,
+      "peakServerFootprintGB": 22.3,
+      "peakServerRssGB": 13.9,
+      "minFreeGB": 3.8,
+      "truncated": 1
+    },
+    {
+      "concurrency": 2,
+      "requests": 8,
+      "wallSeconds": 78,
+      "completionTokens": 5205,
+      "outputTokPerSec": 66.7,
+      "workPerSec": 1.785,
+      "steadyWorkPerSec": 2.065,
+      "meanLatencySeconds": 19.1,
+      "medianLatencySeconds": 18.7,
+      "medianRequestDecodeTokPerSec": 41.6,
+      "peakServerFootprintGB": 24,
+      "peakServerRssGB": 13.9,
+      "minFreeGB": 2.9,
+      "truncated": 1
+    },
+    {
+      "concurrency": 4,
+      "requests": 8,
+      "wallSeconds": 64.2,
+      "completionTokens": 5231,
+      "outputTokPerSec": 81.5,
+      "workPerSec": 2.177,
+      "steadyWorkPerSec": 2.422,
+      "meanLatencySeconds": 27.8,
+      "medianLatencySeconds": 28.4,
+      "medianRequestDecodeTokPerSec": 24.8,
+      "peakServerFootprintGB": 25,
+      "peakServerRssGB": 13.9,
+      "minFreeGB": 2.3,
+      "truncated": 1
+    }
+  ],
+  "projections": [
+    {
+      "parallel": 2,
+      "speedupSteady": 1.49,
+      "speedupWholeLevel": 1.38,
+      "armMinutes": 34.1,
+      "armMinutesConservative": 36.7,
+      "savedPct": 33
+    },
+    {
+      "parallel": 4,
+      "speedupSteady": 1.74,
+      "speedupWholeLevel": 1.68,
+      "armMinutes": 29.9,
+      "armMinutesConservative": 31,
+      "savedPct": 41
+    }
+  ],
+  "stopReason": null,
+  "requests": [
+    {
+      "level": 1,
+      "source": "trace-expired-t3.jsonl#1",
+      "startMs": 3202.7115830000002,
+      "endMs": 7261.931167,
+      "ms": 4059,
+      "uncached": 390,
+      "completion": 262,
+      "modelSeconds": 6.477316384652646,
+      "finish": "stop"
+    },
+    {
+      "level": 1,
+      "source": "onboarding-t3.jsonl#4",
+      "startMs": 7261.942416999999,
+      "endMs": 14513.128625000001,
+      "ms": 7251,
+      "uncached": 696,
+      "completion": 460,
+      "modelSeconds": 11.393889789032354,
+      "finish": "stop"
+    },
+    {
+      "level": 1,
+      "source": "longer-codes-t1.jsonl#6",
+      "startMs": 14513.141917,
+      "endMs": 27855.272417,
+      "ms": 13342,
+      "uncached": 950,
+      "completion": 758,
+      "modelSeconds": 18.39941035963051,
+      "finish": "stop"
+    },
+    {
+      "level": 1,
+      "source": "add-healthz-t3.jsonl#3",
+      "startMs": 27855.283708,
+      "endMs": 37644.698749999996,
+      "ms": 9789,
+      "uncached": 1296,
+      "completion": 527,
+      "modelSeconds": 14.00501110795597,
+      "finish": "stop"
+    },
+    {
+      "level": 1,
+      "source": "explain-self-t2.jsonl#3",
+      "startMs": 37644.7105,
+      "endMs": 52919.45325,
+      "ms": 15275,
+      "uncached": 1725,
+      "completion": 758,
+      "modelSeconds": 19.8784179932183,
+      "finish": "stop"
+    },
+    {
+      "level": 1,
+      "source": "explain-self-t2.jsonl#11",
+      "startMs": 52919.466208,
+      "endMs": 80622.834,
+      "ms": 27703,
+      "uncached": 7137,
+      "completion": 1024,
+      "modelSeconds": 36.02723119581739,
+      "finish": "length"
+    },
+    {
+      "level": 1,
+      "source": "trace-expired-t3.jsonl#1",
+      "startMs": 80622.845292,
+      "endMs": 92244.687333,
+      "ms": 11622,
+      "uncached": 378,
+      "completion": 315,
+      "modelSeconds": 7.614153039236975,
+      "finish": "stop"
+    },
+    {
+      "level": 1,
+      "source": "onboarding-t3.jsonl#4",
+      "startMs": 92244.700375,
+      "endMs": 104272.963708,
+      "ms": 12028,
+      "uncached": 696,
+      "completion": 709,
+      "modelSeconds": 16.84246746955752,
+      "finish": "stop"
+    },
+    {
+      "level": 2,
+      "source": "trace-expired-t3.jsonl#1",
+      "startMs": 104321.670833,
+      "endMs": 110226.18216699999,
+      "ms": 5904,
+      "uncached": 379,
+      "completion": 262,
+      "modelSeconds": 6.456324018240433,
+      "finish": "stop"
+    },
+    {
+      "level": 2,
+      "source": "onboarding-t3.jsonl#4",
+      "startMs": 104322.03474999999,
+      "endMs": 118151.484667,
+      "ms": 13829,
+      "uncached": 697,
+      "completion": 598,
+      "modelSeconds": 14.415491840245878,
+      "finish": "stop"
+    },
+    {
+      "level": 2,
+      "source": "longer-codes-t1.jsonl#6",
+      "startMs": 110226.193667,
+      "endMs": 128178.568792,
+      "ms": 17952,
+      "uncached": 950,
+      "completion": 746,
+      "modelSeconds": 18.136828302737733,
+      "finish": "stop"
+    },
+    {
+      "level": 2,
+      "source": "add-healthz-t3.jsonl#3",
+      "startMs": 118151.499417,
+      "endMs": 140319.777417,
+      "ms": 22168,
+      "uncached": 1296,
+      "completion": 923,
+      "modelSeconds": 22.670218985417677,
+      "finish": "stop"
+    },
+    {
+      "level": 2,
+      "source": "explain-self-t2.jsonl#3",
+      "startMs": 128178.583333,
+      "endMs": 159521.59779200002,
+      "ms": 31343,
+      "uncached": 1725,
+      "completion": 834,
+      "modelSeconds": 21.541437686872566,
+      "finish": "stop"
+    },
+    {
+      "level": 2,
+      "source": "explain-self-t2.jsonl#11",
+      "startMs": 140319.78641700002,
+      "endMs": 171733.49675000002,
+      "ms": 31414,
+      "uncached": 7137,
+      "completion": 1024,
+      "modelSeconds": 36.02723119581739,
+      "finish": "length"
+    },
+    {
+      "level": 2,
+      "source": "trace-expired-t3.jsonl#1",
+      "startMs": 159521.610875,
+      "endMs": 179039.518083,
+      "ms": 19518,
+      "uncached": 378,
+      "completion": 298,
+      "modelSeconds": 7.2421617919722046,
+      "finish": "stop"
+    },
+    {
+      "level": 2,
+      "source": "onboarding-t3.jsonl#4",
+      "startMs": 171733.50404200002,
+      "endMs": 182313.08833300002,
+      "ms": 10580,
+      "uncached": 696,
+      "completion": 520,
+      "modelSeconds": 12.706800073496249,
+      "finish": "stop"
+    },
+    {
+      "level": 4,
+      "source": "trace-expired-t3.jsonl#1",
+      "startMs": 182359.01625000002,
+      "endMs": 194454.17695800003,
+      "ms": 12095,
+      "uncached": 378,
+      "completion": 314,
+      "modelSeconds": 7.592271201162577,
+      "finish": "stop"
+    },
+    {
+      "level": 4,
+      "source": "onboarding-t3.jsonl#4",
+      "startMs": 182359.24412500003,
+      "endMs": 223020.2525,
+      "ms": 40661,
+      "uncached": 696,
+      "completion": 708,
+      "modelSeconds": 16.82058563148312,
+      "finish": "stop"
+    },
+    {
+      "level": 4,
+      "source": "longer-codes-t1.jsonl#6",
+      "startMs": 182359.32316700002,
+      "endMs": 209036.996125,
+      "ms": 26678,
+      "uncached": 951,
+      "completion": 628,
+      "modelSeconds": 15.556679806905306,
+      "finish": "stop"
+    },
+    {
+      "level": 4,
+      "source": "add-healthz-t3.jsonl#3",
+      "startMs": 182359.37429200002,
+      "endMs": 230635.394208,
+      "ms": 48276,
+      "uncached": 1297,
+      "completion": 951,
+      "modelSeconds": 23.284818848447394,
+      "finish": "stop"
+    },
+    {
+      "level": 4,
+      "source": "explain-self-t2.jsonl#3",
+      "startMs": 194454.1975,
+      "endMs": 224526.441208,
+      "ms": 30072,
+      "uncached": 1725,
+      "completion": 574,
+      "modelSeconds": 15.852159787529022,
+      "finish": "stop"
+    },
+    {
+      "level": 4,
+      "source": "explain-self-t2.jsonl#11",
+      "startMs": 209037.007917,
+      "endMs": 246546.99129200002,
+      "ms": 37510,
+      "uncached": 7137,
+      "completion": 1024,
+      "modelSeconds": 36.02723119581739,
+      "finish": "length"
+    },
+    {
+      "level": 4,
+      "source": "trace-expired-t3.jsonl#1",
+      "startMs": 223020.26529200003,
+      "endMs": 232019.328917,
+      "ms": 8999,
+      "uncached": 378,
+      "completion": 260,
+      "modelSeconds": 6.410651945145071,
+      "finish": "stop"
+    },
+    {
+      "level": 4,
+      "source": "onboarding-t3.jsonl#4",
+      "startMs": 224526.449708,
+      "endMs": 242750.60816700003,
+      "ms": 18224,
+      "uncached": 696,
+      "completion": 772,
+      "modelSeconds": 18.221023268244608,
+      "finish": "stop"
+    }
+  ]
+}

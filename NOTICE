@@ -1,0 +1,33 @@
+mlx-tree-spec
+Copyright 2026 Aditya Gajbhiye
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Powered by MTPLX (https://github.com/youssofal/mtplx)
+MTPLX by Youssof Altoukhi, Apache-2.0. mlx-tree-spec is built on the MTPLX
+runtime and kernels and prints this attribution when its server and benchmark
+start, as MTPLX's NOTICE requires.
+
+This product includes code adapted from MTPLX, Copyright 2026 Youssof Altoukhi,
+Apache-2.0:
+  - src/mlx_tree_spec/qmm_packed.py: the NAX verify matmul kernel from
+    mtplx/nax_verify.py, itself adapted from dflash-mlx
+    (https://github.com/bstnxbt/dflash-mlx), Copyright dflash-mlx contributors,
+    Apache-2.0;
+  - src/mlx_tree_spec/tree_flash.py: patches the source of MTPLX's
+    sdpa_nax_flash kernel at runtime (the kernel is read from the installed
+    MTPLX package, not copied);
+  - src/mlx_tree_spec/data/general_vocab.npy: MTPLX's FR-Spec 64K token list
+    (mtplx/data/qwen38_code_ranked_64k.npy) plus 448 tokens.
+
+Benchmark and calibration prompts contain third-party text, unmodified apart
+from concatenation:
+  - src/mlx_tree_spec/data/code_32k.txt and bench/prompts/scenarios/5_*:
+    mlx-lm source (https://github.com/ml-explore/mlx-lm), Copyright 2023-2024
+    Apple Inc., MIT License; and MTPLX source, Apache-2.0;
+  - bench/prompts/scenarios/1_*, 4_*: MTPLX source, Apache-2.0;
+  - bench/prompts/bash_manual_32k.txt and bench/prompts/scenarios/2_*: the
+    GNU Bash 3.2 manual page, Copyright 1989-2005 Free Software Foundation,
+    Inc., distributed under the GNU General Public License v2. These files are
+    test inputs only; they are not linked into or distributed as part of the
+    software.

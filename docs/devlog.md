@@ -100,3 +100,11 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - Run the tree server through `bench/runtimes` S1/S2 on Swift 1.5 4-bit (same build as config C2) for a like-for-like table against MTPLX MTP.
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.
 - Drafting one chain at 27.9K still costs ~2 ms per MTP call (vs 1.2 at short context).
+
+## Drafting experiments (not started)
+Acceptance ideas ranked by expected gain per effort. Code-heavy scenarios run at 97-112 tok/s and 28K summaries at 58-63, but much of that gap comes from verify cost at long context and from prose being less predictable to the target, which no drafter can beat.
+- Measure first: log acceptance at each tree depth per scenario, so the options below can be compared against the same baseline.
+- Tree shape by task: fork full wins on code and chain+siblings on summaries in the tables above. Track acceptance per depth during a request and resize the tree online. No training needed.
+- N-gram (prompt-lookup) branches: add a branch copied from the context where the last few tokens match an earlier span. Summaries, code edits and tests quote the context a lot, which is where the MTP head is weakest. It needs no extra model passes; the branch rides in the same verify pass.
+- Align the head with the served model: check whether the MTP head was trained against base Qwen3.8-27B or the Swift fine-tune. If against the base, distil it on the fine-tune's hidden states and outputs. This helps every task, not only one domain.
+- Domain-specific MTP heads (e.g. code vs prose), routed per request: last on the list. The stock head is already trained on the full mix, so expect a few points of acceptance in-domain. Each head needs its own MTP cache (rebuild on switch, snapshot bank keyed by head), and requests with different heads stop sharing the draft matmuls under `--max-batch`. Mixed agentic turns (prose + code + tool JSON) make per-request routing wrong for much of the output. Go/no-go test: fine-tune a code-only copy (LoRA is enough) on a few thousand target outputs and compare on code. Under ~5 points of acceptance gain, drop it.

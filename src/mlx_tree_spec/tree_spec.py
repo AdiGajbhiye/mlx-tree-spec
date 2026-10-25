@@ -1150,6 +1150,33 @@ def resolve_model(model: str) -> str:
     return snapshot_download(model)
 
 
+def gpu_problem(macos_version: str, architecture: str | None, device_name: str) -> str | None:
+    """Why this machine can't run the packed verify kernels (None if it can).
+    They use the GPU tensor units (NAX) of M5-class GPUs on macOS 26.2+; there is
+    no fallback for M1-M4 yet."""
+    from mtplx.nax_detect import nax_available_for_platform
+
+    if nax_available_for_platform(macos_version, architecture):
+        return None
+    return (
+        "mlx-tree-spec needs an Apple M5-family GPU and macOS 26.2 or later: its verify kernels use the M5 GPU's "
+        f"neural accelerators and have no fallback for M1-M4 yet. This machine: {device_name} "
+        f"({architecture or 'unknown GPU'}), macOS {macos_version or 'unknown'}."
+    )
+
+
+def require_m5_gpu() -> None:
+    """Exit with a readable message on a GPU the kernels don't support, before any download."""
+    import platform
+    import sys
+
+    from mtplx.nax_detect import gpu_architecture
+
+    problem = gpu_problem(platform.mac_ver()[0], gpu_architecture(), mx.device_info().get("device_name", "unknown"))
+    if problem:
+        sys.exit(problem)
+
+
 def load_draft_vocab(spec: str) -> mx.array | None:
     """Token ids for a pruned draft output layer, sorted; None for the full vocab."""
     if spec == "full":
@@ -1316,6 +1343,7 @@ def main():
     from . import POWERED_BY
 
     print(POWERED_BY)
+    require_m5_gpu()
     rt = load(resolve_model(args.model))
     inner = getattr(rt.model, "language_model", rt.model)
     ver = Verifier(rt, inner)

@@ -1,7 +1,7 @@
 """OpenAI-compatible chat server for Qwen3.8-27B on the tree-speculative decoder.
 
-Serves POST /v1/chat/completions (non-streaming), GET /v1/models and GET /health,
-enough for agent harnesses and other OpenAI-compatible clients:
+Serves POST /v1/chat/completions, GET /v1/models and GET /health, enough for
+agent harnesses and other OpenAI-compatible clients:
 
   - decoding: tree-speculative decoding (tree_verify.ForkState) on the packed
     4-bit target with the MTP head drafting (fork:15,2,4,4 by default), MTPLX's
@@ -22,6 +22,9 @@ enough for agent harnesses and other OpenAI-compatible clients:
     the answer, message.reasoning_content the thinking, and
     usage.completion_tokens_details.reasoning_tokens counts it. --default-effort
     sets reasoning_effort for requests that send none;
+  - "stream": true sends server-sent events, one chunk per decode step (the
+    tokens accepted in it), with the same reasoning/content split as deltas;
+    stream_options.include_usage adds a final usage chunk;
   - --trace-log appends each request's prompt and reply tokens, thinking and
     answer text (one JSON line per request) for offline analysis;
   - a body with "prompt_ids" instead of "messages" decodes those tokens as is
@@ -74,6 +77,16 @@ class Job:
         self.response: dict | None = None
         self.error: Exception | None = None
         self.cancelled = False  # the client went away: drop it at the next step
+        # streaming: the engine puts each step's new reply tokens (EOS left out),
+        # then None once the job ends; `thinking` is known after the prefill
+        self.chunks: queue.Queue[list[int] | None] | None = queue.Queue() if body.get("stream") else None
+        self.sent = 0
+        self.thinking = False
+
+    def end(self) -> None:
+        self.done.set()
+        if self.chunks is not None:
+            self.chunks.put(None)
 
 
 class Engine:
@@ -187,21 +200,22 @@ class Engine:
                 except queue.Empty:
                     break
                 if job.cancelled:
-                    job.done.set()
+                    job.end()
                     continue
                 try:
                     st, meta = self._begin(job)
                 except Exception as e:  # noqa: BLE001
                     job.error = e
-                    job.done.set()
+                    job.end()
                     continue
                 if st.done:
                     self._finish(job, st, meta)
                 else:
+                    self._emit(job, st)
                     active.append((job, st, meta))
             for job, _, meta in [a for a in active if a[0].cancelled]:
                 print(json.dumps({"cancelled": True, "prompt_tokens": len(meta["prompt"])}), flush=True)
-                job.done.set()
+                job.end()
             active = [a for a in active if not a[0].cancelled]
             if not active:
                 continue
@@ -210,10 +224,12 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 for job, _, _ in active:
                     job.error = e
-                    job.done.set()
+                    job.end()
                 active = []
                 mx.clear_cache()
                 continue
+            for job, st, _ in active:
+                self._emit(job, st)
             for job, st, meta in [a for a in active if a[1].done]:
                 self._finish(job, st, meta)
             active = [a for a in active if not a[1].done]
@@ -238,9 +254,25 @@ class Engine:
         st = tv.ForkState(self.inner, self.drafter, max_tokens, self.eos, state, policy, temperature)
         meta = dict(prompt=prompt, thinking=thinking, temperature=temperature, cached=cached, t0=t0,
                     t_first=time.perf_counter(), batch=0, effort=kwargs.get("reasoning_effort"))
+        job.thinking = thinking
         return st, meta
 
+    def _emit(self, job: Job, st: tv.ForkState) -> None:
+        """Hand a streaming job the reply tokens accepted since the last call, cut
+        like ForkState.result (at max_new and before the first EOS)."""
+        if job.chunks is None:
+            return
+        new = []
+        for tk in st.out[job.sent : st.max_new]:
+            if tk in self.eos:
+                break
+            new.append(tk)
+        if new:
+            job.sent += len(new)
+            job.chunks.put(new)
+
     def _finish(self, job: Job, st: tv.ForkState, meta: dict) -> None:
+        self._emit(job, st)
         decode_s = time.perf_counter() - meta["t_first"]
         out, stats = st.result(decode_s)
         prompt, thinking = meta["prompt"], meta["thinking"]
@@ -292,7 +324,54 @@ class Engine:
         }
         if raw:
             job.response["gen_ids"] = gen
-        job.done.set()
+        job.end()
+
+
+class TextStream:
+    """Incremental tok.decode: the text a token list adds, held back while it ends
+    in a partial UTF-8 character. Decodes only from the last clean boundary, so the
+    pieces join to exactly tok.decode(all tokens)."""
+
+    def __init__(self, tok):
+        self.tok, self.ids, self.start, self.read = tok, [], 0, 0
+
+    def add(self, ids: list[int], final: bool = False) -> str:
+        self.ids += ids
+        done = self.tok.decode(self.ids[self.start : self.read])
+        text = self.tok.decode(self.ids[self.start :])
+        if len(text) <= len(done) or (text.endswith("�") and not final):
+            return ""
+        self.start, self.read = self.read, len(self.ids)
+        return text[len(done) :]
+
+
+class DeltaStream:
+    """A streamed reply's tokens as chat-completion deltas, split like
+    Engine._finish: reasoning up to </think>, then the content with its leading
+    whitespace dropped."""
+
+    def __init__(self, tok, think_end: int, thinking: bool):
+        self.think_end, self.in_reasoning, self.strip = think_end, thinking, True
+        self.reasoning, self.content = TextStream(tok), TextStream(tok)
+
+    def feed(self, ids: list[int], final: bool = False) -> list[dict]:
+        r, c = [], []
+        for tk in ids:
+            if self.in_reasoning and tk == self.think_end:
+                self.in_reasoning = False
+            else:
+                (r if self.in_reasoning else c).append(tk)
+        out = []
+        r_text = self.reasoning.add(r, final or not self.in_reasoning)
+        if r_text:
+            out.append({"reasoning_content": r_text})
+        c_text = self.content.add(c, final)
+        if self.strip:
+            c_text = c_text.lstrip()
+            self.strip = not c_text
+        if c_text:
+            out.append({"content": c_text})
+        return out
 
 
 def _common(a: list[int], b: list[int]) -> int:
@@ -344,8 +423,8 @@ def serve(engine: Engine, host: str, port: int) -> None:
                 return
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))))
-                if body.get("stream"):
-                    raise ValueError("streaming is not supported")
+                if body.get("stream") and "prompt_ids" in body:
+                    raise ValueError("streaming is not supported with prompt_ids")
                 if not isinstance(body.get("messages"), list) and not isinstance(body.get("prompt_ids"), list):
                     raise ValueError("messages (or prompt_ids) must be a list")
             except Exception as e:  # noqa: BLE001
@@ -353,6 +432,9 @@ def serve(engine: Engine, host: str, port: int) -> None:
                 return
             job = Job(body, self.headers.get("x-mtplx-cache-mode", "") == "stateless")
             engine.jobs.put(job)
+            if job.chunks is not None:
+                self._stream(job)
+                return
             while not job.done.wait(1.0):
                 if _client_gone(self.connection):  # e.g. its timeout fired: free the batch slot
                     job.cancelled = True
@@ -363,6 +445,63 @@ def serve(engine: Engine, host: str, port: int) -> None:
                 self._send(code, {"error": {"message": repr(job.error)}})
             else:
                 self._send(200, job.response)
+
+        def _stream(self, job: Job) -> None:
+            """Server-sent events, one chunk per decode step. The status line waits
+            for the first tokens, so a request that fails in prefill still gets a
+            plain JSON error; a failure after that ends the stream with an error event."""
+            base = {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion.chunk", "created": int(time.time()),
+                    "model": job.body.get("model", engine.model_id)}
+            deltas: DeltaStream | None = None
+
+            def event(obj) -> None:
+                self.wfile.write(b"data: " + (obj if isinstance(obj, bytes) else json.dumps(obj).encode()) + b"\n\n")
+                self.wfile.flush()
+
+            def chunk(delta: dict, finish: str | None = None) -> dict:
+                return {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+            try:
+                while True:
+                    try:
+                        ids = job.chunks.get(timeout=1.0)
+                    except queue.Empty:
+                        if _client_gone(self.connection):  # still queued or in prefill
+                            job.cancelled = True
+                            return
+                        continue
+                    if ids is None:
+                        break
+                    if deltas is None:
+                        deltas = DeltaStream(engine.tok, engine.think_end, job.thinking)
+                        self.send_response(200)
+                        self.send_header("content-type", "text/event-stream")
+                        self.send_header("cache-control", "no-cache")
+                        self.end_headers()
+                        event(chunk({"role": "assistant", "content": ""}))
+                    for d in deltas.feed(ids):
+                        event(chunk(d))
+                if job.error is not None and deltas is None:
+                    code = 400 if isinstance(job.error, (ValueError, KeyError)) else 500
+                    self._send(code, {"error": {"message": repr(job.error)}})
+                    return
+                if deltas is None:  # finished without a token (EOS first)
+                    self.send_response(200)
+                    self.send_header("content-type", "text/event-stream")
+                    self.end_headers()
+                    event(chunk({"role": "assistant", "content": ""}))
+                else:
+                    for d in deltas.feed([], final=True):
+                        event(chunk(d))
+                if job.error is not None:
+                    event({"error": {"message": repr(job.error)}})
+                else:
+                    event(chunk({}, job.response["choices"][0]["finish_reason"]))
+                    if (job.body.get("stream_options") or {}).get("include_usage"):
+                        event({**base, "choices": [], "usage": job.response["usage"]})
+                event(b"[DONE]")
+            except (BrokenPipeError, ConnectionResetError):
+                job.cancelled = True
 
         def log_message(self, *args):  # requests are logged by Engine._finish
             pass
@@ -389,6 +528,7 @@ def main() -> None:
                     help="reasoning_effort for requests that send none (default: the chat template's)")
     args = ap.parse_args()
     print(POWERED_BY, flush=True)
+    ts.require_m5_gpu()
     engine = Engine(args.model, tuple(int(x) for x in args.fork.split(",")), args.curve_context, args.log, args.max_batch,
                     args.cache_limit_gb, args.default_effort, args.trace_log)
     print(f"serving on http://{args.host}:{args.port} (max batch {args.max_batch})", flush=True)

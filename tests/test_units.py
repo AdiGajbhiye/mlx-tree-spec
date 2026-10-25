@@ -44,3 +44,44 @@ def test_resolve_local_dir(tmp_path):
 
 def test_attribution():
     assert "MTPLX" in POWERED_BY and "github.com/youssofal/mtplx" in POWERED_BY
+
+
+class _ByteTok:
+    """Byte-level stand-in tokenizer: ids < 256 are bytes, 1000 is </think>."""
+
+    def decode(self, ids):
+        return b"".join(b"</think>" if i == 1000 else bytes([i]) for i in ids).decode("utf-8", "replace")
+
+
+def _stream(ids, sizes, thinking):
+    from mlx_tree_spec.server import DeltaStream
+
+    ds, out, i = DeltaStream(_ByteTok(), 1000, thinking), {"reasoning_content": "", "content": ""}, 0
+    for n in sizes:
+        for d in ds.feed(ids[i : i + n]):
+            for k, v in d.items():
+                assert v
+                out[k] += v
+        i += n
+    for d in ds.feed(ids[i:], final=True):
+        for k, v in d.items():
+            out[k] += v
+    return out
+
+
+def test_delta_stream_matches_whole_decode():
+    reasoning, content = "Think: naïve → café 🙂\n", "\n\n  Answer — 文字 🙂 done."
+    ids = list(reasoning.encode()) + [1000] + list(content.encode())
+    for sizes in ([1] * len(ids), [3, 1, 4, 1, 5, 9, 2, 6] * 20, [len(ids)]):
+        assert _stream(ids, sizes, thinking=True) == {"reasoning_content": reasoning, "content": content.lstrip()}
+    plain = list(content.encode())
+    assert _stream(plain, [2] * 40, thinking=False) == {"reasoning_content": "", "content": content.lstrip()}
+
+
+def test_gpu_problem():
+    from mlx_tree_spec.tree_spec import gpu_problem
+
+    assert gpu_problem("26.2", "applegpu_g17s", "Apple M5 Max") is None
+    assert "M1-M4" in gpu_problem("26.2", "applegpu_g16s", "Apple M4 Max")
+    assert "macOS 15.5" in gpu_problem("15.5", "applegpu_g17s", "Apple M5")
+    assert gpu_problem("26.2", None, "unknown")

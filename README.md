@@ -69,7 +69,8 @@ The development log with every measurement, including what didn't help, is in
 ## Requirements
 
 - **Apple M5-family GPU** (the packed matmuls and flash kernels use the M5's GPU neural
-  accelerators) and macOS 26.2 or later. Tested only on an M5 Max with 36 GB.
+  accelerators) and macOS 26.2 or later. Tested only on an M5 Max with 36 GB. On M1–M4 the
+  server and benchmark exit at startup with a message saying so; there is no fallback yet.
 - About 20 GB of free unified memory for the 4-bit 27B model plus KV cache.
 - Python 3.11+.
 
@@ -93,8 +94,10 @@ curl -s localhost:8090/v1/chat/completions -H 'content-type: application/json' \
 
 The server answers `POST /v1/chat/completions`, `GET /v1/models` and `GET /health`. Thinking is on
 by default (the model's chat template). The reasoning comes back in `message.reasoning_content`,
-and `--default-effort` sets `reasoning_effort` for requests that send none. `--help` lists the
-options.
+and `--default-effort` sets `reasoning_effort` for requests that send none. `"stream": true` sends
+server-sent events with one chunk per decode step, i.e. every token accepted in that step. The
+reasoning arrives as `delta.reasoning_content`, and `stream_options.include_usage` adds a final
+usage chunk. `--help` lists the options.
 
 Run the tests (the lossless check loads the model):
 
@@ -105,7 +108,6 @@ MLX_TREE_SPEC_MODEL=Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed .venv/bin/pytest
 
 ## Limitations
 
-- **No streaming yet**: responses come back whole. `"stream": true` is rejected.
 - Only the Qwen3.8-27B architecture (hybrid GatedDeltaNet with an MTP head) loaded through MTPLX.
 - **Greedy output is not token-for-token identical to plain decoding.** Verify passes run 8–16
   rows through different kernels than one-token decoding, so bf16 rounding flips near-ties and

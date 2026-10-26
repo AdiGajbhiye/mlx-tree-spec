@@ -101,6 +101,15 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.
 - Drafting one chain at 27.9K still costs ~2 ms per MTP call (vs 1.2 at short context).
 
+## Constrained decoding for the agent harness (not started)
+The state-machine harness (`~/projects/state-machine-harness`) rejects about 3% of replies and asks again, costing a whole extra call each time. In an audit of 132 runs, 13 of 27 rejects were a fact citing a file the agent never read, 9 a fact in the wrong shape, and 4 a removal of a fact or plan item that doesn't exist. A grammar applied while decoding makes all of these impossible to generate.
+- Request field: `grammar` (a JSON schema, or a TypeScript-subset grammar if the harness moves to writing programs) applied to the reply after `</think>`; thinking stays free.
+- Per-request value lists: the harness sends what is valid for this step, e.g. a fact's `from` must be one of the files read so far plus `search` | `command` | `note`, and plan ids must exist. The grammar is built for each request, so it can't be a fixed compiled schema.
+- Library: compare llguidance and xgrammar for MLX on the per-token cost of the mask over the 248K vocabulary, and the time to compile a per-request grammar.
+- Tree speculation needs: a mask for every drafted node (16-32 per step), not one per step. Drafted tokens the grammar forbids are pruned before verify, which frees verify rows. Spans the grammar forces (e.g. `"status": {`) are appended without sampling.
+- Measure first, on recorded harness requests: mask cost per step against a 15-40 ms step, tokens per step with and without pruning, and the share of reply tokens that are forced.
+- Go/no-go: rejects go to 0 on the harness's eval with tokens per step not lower and step time up less than 5%. If the mask costs more than that, apply it only to the drafted path the target accepts, at verify.
+
 ## Drafting experiments (not started)
 Acceptance ideas ranked by expected gain per effort. Code-heavy scenarios run at 97-112 tok/s and 28K summaries at 58-63, but much of that gap comes from verify cost at long context and from prose being less predictable to the target, which no drafter can beat.
 - Measure first: log acceptance at each tree depth per scenario, so the options below can be compared against the same baseline.

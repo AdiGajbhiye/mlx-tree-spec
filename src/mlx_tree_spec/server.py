@@ -33,7 +33,9 @@ agent harnesses and other OpenAI-compatible clients:
 
 HTTP requests are queued to the main thread, which loaded the model and runs
 all MLX work (MLX ties streams to threads); a request whose client disconnects
-(e.g. timed out) is dropped at the next step. Each request is logged as a JSON
+(e.g. timed out) is dropped at the next step. While idle within
+--keepalive-window of the last request, that thread runs a tiny kernel every
+second so macOS keeps the weights' Metal residency (see KEEPALIVE_S). Each request is logged as a JSON
 line (--log).
 
   mlx-tree-spec-server --port 8090 --max-batch 4
@@ -63,6 +65,13 @@ from . import POWERED_BY
 from mtplx.runtime import load
 
 PREFILL_CHUNK = ts.PREFILL_CHUNK
+# macOS drops an idle process's Metal residency ~2.5 s after its last command
+# buffer; the next prefill then pays ~10 ms per GiB of weights to restore it
+# (measured +150-200 ms for this model after 3 s of quiet, none after 2 s).
+# A tiny kernel every KEEPALIVE_S while idle holds it, as MTPLX does, but only
+# for KEEPALIVE_WINDOW_S after the last request so an unused server stays asleep.
+KEEPALIVE_S = 1.0
+KEEPALIVE_WINDOW_S = 600.0
 MIN_SNAPSHOT = 256  # shortest shared prefix worth a snapshot
 BANK = 4  # snapshots kept
 RECENT = 8  # recent prompts a new one is matched against for a snapshot point
@@ -91,7 +100,8 @@ class Job:
 
 class Engine:
     def __init__(self, model: str, config: tuple[int, int, int, int], curve_context: int, log: str | None, max_batch: int,
-                 cache_limit_gb: float = 2.0, default_effort: str | None = None, trace_log: str | None = None):
+                 cache_limit_gb: float = 2.0, default_effort: str | None = None, trace_log: str | None = None,
+                 keepalive_window_s: float = KEEPALIVE_WINDOW_S):
         mx.set_cache_limit(int(cache_limit_gb * 1e9))
         mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
         self.rt = load(ts.resolve_model(model))
@@ -124,7 +134,18 @@ class Engine:
             self.long = (curve_l, row_l, draft_l, ts.VERIFY_MS_CTX[0], len(ids))
         ts._PREFILLED.clear()
         mx.clear_cache()
+        self.keepalive_window_s = keepalive_window_s
+        self._probe = mx.ones((64, 64))
+        mx.eval(self._probe)
+        self.last_work = time.monotonic()
         print(f"cost curves measured in {time.perf_counter() - t:.0f} s; ready", flush=True)
+
+    def _idle_wait(self) -> float | None:
+        """How long an idle engine waits for a request before a keepalive beat
+        (None: no beat, block until one comes)."""
+        if time.monotonic() - self.last_work < self.keepalive_window_s:
+            return KEEPALIVE_S
+        return None
 
     # ------------------------------------------------------------- prefill
 
@@ -196,8 +217,10 @@ class Engine:
         while True:
             while len(active) < self.max_batch:
                 try:
-                    job = self.jobs.get(block=not active)
+                    job = self.jobs.get(block=not active, timeout=None if active else self._idle_wait())
                 except queue.Empty:
+                    if not active:  # idle for KEEPALIVE_S: hold the GPU residency
+                        mx.eval(self._probe @ self._probe)
                     break
                 if job.cancelled:
                     job.end()
@@ -235,6 +258,7 @@ class Engine:
             active = [a for a in active if not a[1].done]
             if not active:
                 mx.clear_cache()
+                self.last_work = time.monotonic()
 
     def _begin(self, job: Job):
         body = job.body
@@ -273,6 +297,7 @@ class Engine:
 
     def _finish(self, job: Job, st: tv.ForkState, meta: dict) -> None:
         self._emit(job, st)
+        self.last_work = time.monotonic()
         decode_s = time.perf_counter() - meta["t_first"]
         out, stats = st.result(decode_s)
         prompt, thinking = meta["prompt"], meta["thinking"]
@@ -526,11 +551,14 @@ def main() -> None:
     ap.add_argument("--trace-log", help="append each request's tokens, thinking and answer (one JSON line per request)")
     ap.add_argument("--default-effort", choices=["low", "medium", "xhigh"],
                     help="reasoning_effort for requests that send none (default: the chat template's)")
+    ap.add_argument("--keepalive-window", type=float, default=KEEPALIVE_WINDOW_S,
+                    help="seconds after the last request to keep the GPU warm with a tiny kernel every second, so the "
+                         "next prefill doesn't pay ~0.2 s to restore Metal residency (0: off)")
     args = ap.parse_args()
     print(POWERED_BY, flush=True)
     ts.require_m5_gpu()
     engine = Engine(args.model, tuple(int(x) for x in args.fork.split(",")), args.curve_context, args.log, args.max_batch,
-                    args.cache_limit_gb, args.default_effort, args.trace_log)
+                    args.cache_limit_gb, args.default_effort, args.trace_log, args.keepalive_window)
     print(f"serving on http://{args.host}:{args.port} (max batch {args.max_batch})", flush=True)
     serve(engine, args.host, args.port)
 

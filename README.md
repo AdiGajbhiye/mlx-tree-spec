@@ -6,8 +6,8 @@ kernels: the model's own multi-token-prediction (MTP) head drafts a small **tree
 continuations instead of one chain, and the target verifies all branches in one pass.
 
 On an M5 Max, for one request, this decodes the 27B model **about 1.4x faster than MTPLX's own
-MTP decoding** in the same benchmark harness (1.24–1.82x across contexts and tasks). It is
-2.6–3.2x faster than plain decoding, and still does **56 tok/s at 32K context**. With **4 requests
+MTP decoding** in the same benchmark harness (1.25–1.86x across contexts and tasks). It is
+2.6–3.3x faster than plain decoding, and still does **56 tok/s at 32K context**. With **4 requests
 at once** it does **128 tok/s total**.
 
 > Status: research code that has run a few hundred agentic-coding sessions. Measured on one
@@ -24,23 +24,22 @@ stock Qwen3.8-27B 4-bit (the default download). MTPLX ran MTP at depth 3. Decode
 |---|---:|---:|---:|---:|---:|---:|
 | plain decoding (MTPLX, no MTP) | 24.6 | 24.5 | 24.0 | 23.5 | 22.7 | 21.6 |
 | MTPLX, MTP chain | 51.8 | 54.4 | 54.3 | 54.1 | 47.0 | 40.0 |
-| this server | **75.4** | **75.8** | **73.9** | **76.2** | **61.9** | **56.5** |
+| this server | **76.6** | **76.2** | **71.0** | **76.3** | **66.1** | **56.0** |
 
 | task (S2) | code | prose | math | json | edit | creative |
 |---|---:|---:|---:|---:|---:|---:|
 | MTPLX, MTP chain | 61.0 | 48.5 | 62.2 | 66.2 | 69.7 | 39.8 |
-| this server | **86.0** | **63.4** | **100.6** | **103.4** | **127.1** | **51.4** |
+| this server | **87.2** | **62.8** | **100.8** | **102.2** | **126.5** | **51.3** |
 
-Swift 1.5 (a Qwen3.8-27B fine-tune) gives the same picture: 1.28–1.47x over MTPLX's MTP across
+Swift 1.5 (a Qwen3.8-27B fine-tune) gives the same picture: 1.31–1.41x over MTPLX's MTP across
 contexts.
 
 The one exception is MTPLX's "context copy" mode, which drafts by copying spans straight out of
 the prompt. On a task whose answer is mostly the prompt's own file, it reaches 158 tok/s against
-this server's 127. Time to first token is 10% faster than MTPLX's at 128 tokens, equal at 1K,
-and 2–3% slower from 4K up (0.1–1.2 s). That was measured before the packed-layout prefill
-kernel, which cut prefill's overhead over stock MLX from 4–7.5% to 1–2% in-process; the MTPLX
-comparison hasn't been rerun since. The server also takes ~40 s to start, because it measures its cost curves first,
-against MTPLX's ~10 s.
+this server's 129. Time to first token is shorter than with MTPLX's MTP at every context:
+17–21% at 128 tokens, 10% at 1K and 2–5% from 4K up (e.g. 48.0 vs 48.8 s at 32K on the stock
+model). Long prompts run a prefill kernel that reads the packed 4-bit weights directly. The
+server takes ~40 s to start, because it measures its cost curves first, against MTPLX's ~10 s.
 
 All tables are in [bench/runtimes/summary-tree.md](bench/runtimes/summary-tree.md). The MTPLX
 rows were measured two days before the tree rows.
@@ -153,9 +152,9 @@ MLX_TREE_SPEC_MODEL=Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed .venv/bin/pytest
   within the first 20 tokens. `tests/test_lossless.py` re-scores the output in one teacher-forced pass and
   checks that every emitted token is the target's own top choice, up to such near-ties. Task
   quality held in the eval above (30/30 vs the MTPLX baseline's 29/30).
-- Prefill of long prompts measured 2–3% slower than MTPLX's before the packed-layout prefill
-  kernel; it is now within 1–2% of stock MLX in-process (not yet rerun against MTPLX). Startup
-  takes ~40 s because the server measures its cost curves first.
+- Prefill is within 1–2% of stock MLX's kernels in-process (and 2–5% faster than MTPLX's MTP
+  server from 4K tokens up). Startup takes ~40 s because the server measures its cost curves
+  first.
 - Greedy decoding at around 9K context isn't exactly repeatable from run to run, even with
   plain decoding; the cause isn't found yet.
 

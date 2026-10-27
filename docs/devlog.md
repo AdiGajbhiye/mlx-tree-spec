@@ -18,7 +18,8 @@ Prompts of 64+ rows per chunk now go to `qmm_packed.prefill_kernel` instead of u
 | 4,096 | 5,427 ms | +4.6% | +1.9% |
 | 8,192 | 11,164 ms | +4.0% | +0.9% |
 
-  From 1K tokens up the prefill result (first token and the MTP hidden after the prompt) is bit-identical to stock. Stock has to run first, because installing the packed layout drops MLX's arrays. Its repetitions got slower as the run went on (4K: 5,232 / 5,427 / 5,485 ms), while the kernel's stayed within 0.3%. Part of the remaining 1-2% is therefore run order. Not yet rerun against MTPLX through the server.
+  From 1K tokens up the prefill result (first token and the MTP hidden after the prompt) is bit-identical to stock. Stock has to run first, because installing the packed layout drops MLX's arrays. Its repetitions got slower as the run went on (4K: 5,232 / 5,427 / 5,485 ms), while the kernel's stayed within 0.3%. Part of the remaining 1-2% is therefore run order.
+- Through the server (bench/runtimes T1/T2 rerun the same day, swap flat; MTPLX rows still from 2026-10-25), time to first token went from 0.97-0.98x of MTPLX's MTP from 4K up to 1.02-1.05x (>1 = faster): T2 vs Q5 1.21 / 1.10 / 1.03 / 1.03 / 1.02 / 1.02x at 128 / 1K / 4K / 8K / 16K / 32K; T1 vs C2 1.18 / 1.10 / 1.04 / 1.03 / 1.03 / 1.02x. At 32K the stock model takes 48.0 s vs 50.0 s before. 128 and 1K gained too (0.37 -> 0.34 s, 1.53 -> 1.40 s): those prompts now take the new kernel instead of the 32-row NAX path. Decode cells moved within run-to-run noise (T2 S1 -4% to +7%, S2 -1% to +1%); `results-tree.jsonl` and `summary-tree.md` now hold this run.
 
 # Prefill: idle residency and weight unpacking (2026-10-27)
 

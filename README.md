@@ -37,8 +37,9 @@ contexts.
 The one exception is MTPLX's "context copy" mode, which drafts by copying spans straight out of
 the prompt. On a task whose answer is mostly the prompt's own file, it reaches 158 tok/s against
 this server's 127. Time to first token is 10% faster than MTPLX's at 128 tokens, equal at 1K,
-and 2–3% slower from 4K up (0.1–1.2 s), because prefill unpacks the packed 4-bit weights for each
-long chunk. The server also takes ~40 s to start, because it measures its cost curves first,
+and 2–3% slower from 4K up (0.1–1.2 s). That was measured before the packed-layout prefill
+kernel, which cut prefill's overhead over stock MLX from 4–7.5% to 1–2% in-process; the MTPLX
+comparison hasn't been rerun since. The server also takes ~40 s to start, because it measures its cost curves first,
 against MTPLX's ~10 s.
 
 All tables are in [bench/runtimes/summary-tree.md](bench/runtimes/summary-tree.md). The MTPLX
@@ -152,8 +153,9 @@ MLX_TREE_SPEC_MODEL=Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed .venv/bin/pytest
   within the first 20 tokens. `tests/test_lossless.py` re-scores the output in one teacher-forced pass and
   checks that every emitted token is the target's own top choice, up to such near-ties. Task
   quality held in the eval above (30/30 vs the MTPLX baseline's 29/30).
-- Prefill of long prompts is 2–3% slower than MTPLX's, because the packed weights are unpacked for
-  each 2048-token chunk. Startup takes ~40 s because the server measures its cost curves first.
+- Prefill of long prompts measured 2–3% slower than MTPLX's before the packed-layout prefill
+  kernel; it is now within 1–2% of stock MLX in-process (not yet rerun against MTPLX). Startup
+  takes ~40 s because the server measures its cost curves first.
 - Greedy decoding at around 9K context isn't exactly repeatable from run to run, even with
   plain decoding; the cause isn't found yet.
 

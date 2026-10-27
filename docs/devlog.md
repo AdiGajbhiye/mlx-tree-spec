@@ -2,6 +2,24 @@
 
 Measurements from building the decoder, newest first. All on one M5 Max (36 GB) with Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy, unless noted. Raw JSON for the scenario sweeps is in [results/](../results); the agentic coding eval mentioned below is a separate private suite (10 coding-agent tasks, 3 trials each, pass/fail graded) and is not part of this repo.
 
+# Prefill kernel on the packed layout (2026-10-27)
+
+Prompts of 64+ rows per chunk now go to `qmm_packed.prefill_kernel` instead of unpacking each weight back to MLX's layout per call. It is MLX's own prefill GEMM (`affine_qmm_t_nax`: 64x64 output tile, 2x2 simdgroups, NAX tiles) with the weight loader rewritten for the packed layout. Each thread dequantizes one row's 16-wide K block (one 8-byte read; a simdgroup reads 256 contiguous bytes) into threadgroup memory. MLX's NAX tile helpers (`steel/gemm/nax.h`) are inlined from the installed package at runtime, because custom kernels compile without MLX's include path.
+
+- Output is bit-identical to `mx.quantized_matmul` wherever MLX uses its NAX GEMM: from 64 rows on the large shapes, from ~320 on k/v (5120->1024). Where MLX picks another kernel, ours is closer to a float32 reference than MLX's own.
+- Per matmul (`experiments/qmm_prefill.py`, 8-call dependent chains, time vs MLX's kernel): BK 64 runs 0.92-0.99x on most shapes at 320-2048 rows. The down projection (K 17408) at 2048 rows was 1.06-1.09x with BK 64 and 0.95-1.0x with BK 128, so that shape uses BK 128. The unpack path was 1.02-1.21x.
+- From 64 rows it matches or beats the 32-row NAX path (`nax_multi_kernel`) on the large shapes, so `PREFILL_M` went from 320 to 64. Below 64 rows the 32-row path stays; it is faster at 24 rows.
+- Real model, in-process, `tree_spec.prefill` (target + MTP, 2048-token chunks), medians of 3, swap flat (`experiments/prefill_e2e.py`, `results/prefill_kernel.json`):
+
+| tokens | stock MLX | unpack (before) | packed prefill kernel |
+|---|---|---|---|
+| 200 | 357 ms | +1.3% | -3.1% |
+| 1,024 | 1,329 ms | +7.5% | +1.1% |
+| 4,096 | 5,427 ms | +4.6% | +1.9% |
+| 8,192 | 11,164 ms | +4.0% | +0.9% |
+
+  From 1K tokens up the prefill result (first token and the MTP hidden after the prompt) is bit-identical to stock. Stock has to run first, because installing the packed layout drops MLX's arrays. Its repetitions got slower as the run went on (4K: 5,232 / 5,427 / 5,485 ms), while the kernel's stayed within 0.3%. Part of the remaining 1-2% is therefore run order. Not yet rerun against MTPLX through the server.
+
 # Prefill: idle residency and weight unpacking (2026-10-27)
 
 The first S1 run (below) showed the tree server 0.1-1.4 s slower to the first token than MTPLX. There were two causes.
@@ -19,7 +37,7 @@ Ruled out:
 - streaming;
 - lingering handler threads (all idle).
 
-**Unpacking the packed weights (open, see Open).** Prompts of 320+ rows per chunk rebuild each 4-bit weight in MLX's layout per forward pass. Same model, one process, stock MLX kernels vs packed:
+**Unpacking the packed weights (fixed above).** Prompts of 320+ rows per chunk rebuild each 4-bit weight in MLX's layout per forward pass. Same model, one process, stock MLX kernels vs packed:
 - 200 tokens: 350 vs 336 ms (the NAX multi-tile path is 4% faster);
 - 1,024 tokens: 1,268 vs 1,390 ms (+9.6%);
 - 4,096 tokens: 5,284 vs 5,566 ms (+5.3%);
@@ -158,9 +176,6 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - End to end: plain decoding +1%; speculative configs within noise (-3% to +2%). Worth it for memory, not speed. Outputs first differ from bf16 KV after ~110-1450 tokens.
 
 ## Open
-- **Next optimization: a prefill kernel on the packed layout.** Prompts of 320+ rows per chunk rebuild every 4-bit weight in MLX's layout for each forward (`packed_linear._unpacked`) and then call `mx.quantized_matmul`. That costs ~100-120 ms per 2048-token forward and makes prefill 3-10% slower than MLX's stock kernels on the same model: +9.6% at 1K, +5.3% at 4K, +3.3% at 8K. Below 320 rows the NAX multi-tile kernel is already 4% faster than stock. Keeping both layouts would cost ~14 GB, which won't fit on 36 GB. Options:
-  - a GEMM kernel that reads the packed layout at `quantized_matmul` speed (the NAX tile is ~1.2x slower at 2048 rows);
-  - unpacking once per layer per request instead of once per chunk. That only helps prompts longer than 2048 tokens, and the layer-major attempt in round 3 didn't help.
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.
 - Drafting one chain at 27.9K still costs ~2 ms per MTP call (vs 1.2 at short context).
 

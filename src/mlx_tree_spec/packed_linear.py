@@ -12,9 +12,10 @@ that layout:
       dependent chain. The GEMV is what keeps 1-token decode at MLX's speed: an
       8-row tile padded around 1 row cost ~12% per token.
   16 < M < PREFILL_M (short prompts): one NAX dispatch over 32-row chunks.
-  M >= PREFILL_M (long prompts): unpack the weight back to MLX's layout for the
-      call and use mx.quantized_matmul; the ~90 ms per forward of copying is
-      cheaper there than the NAX tile's ~1.2x of MLX's prefill GEMM.
+  M >= PREFILL_M (prompts): qmm_packed.prefill_kernel, MLX's own prefill GEMM
+      with a loader for the packed layout; same speed and bit-identical output.
+      (It replaced unpacking the weight to MLX's layout per call, which cost
+      ~100-120 ms per 2048-token forward.)
 For M <= 16 each module has its launches prebuilt (shape-specialized kernels
 with the weights bound): ~400 calls per forward through the generic path took
 as much CPU as MLX's whole stock forward graph.
@@ -33,14 +34,15 @@ from collections import defaultdict
 import mlx.core as mx
 import mlx.nn as nn
 
-from .qmm_packed import _qmv_kernel, nax_kernel, nax_multi_kernel, pack_nax
+from .qmm_packed import _qmv_kernel, nax_kernel, nax_multi_kernel, pack_nax, prefill_kernel
 
 _ORIG_CALL = nn.QuantizedLinear.__call__
 # (K, N, M) -> ("nax", bm) | ("qmv", split, rows per lane)
 _PLAN: dict[tuple[int, int, int], tuple] = {}
 QMV_CONFIGS = ((8, 4), (8, 8), (16, 4))  # (split, rows per lane)
 MULTI_TILE = (32, 2, 32)  # (rows, simdgroups, K step) for 17 .. PREFILL_M - 1 rows
-PREFILL_M = 320
+PREFILL_M = 64
+PREFILL_UNPACK = False  # the previous M >= PREFILL_M path, for comparison
 STATS: dict[str, int] = defaultdict(int)
 
 
@@ -88,9 +90,15 @@ def _call(self, x):
     if run is not None and x.dtype == self._dt:
         return run(x)
     if rows >= PREFILL_M:
-        STATS["unpacked"] += 1
-        w, s, b = _unpacked(self)
-        return mx.quantized_matmul(x, w, s, b, transpose=True, group_size=self.group_size, bits=4)
+        k = sh[-1]
+        if PREFILL_UNPACK or self._n % 64:
+            STATS["unpacked"] += 1
+            w, s, b = _unpacked(self)
+            return mx.quantized_matmul(x, w, s, b, transpose=True, group_size=self.group_size, bits=4)
+        STATS["prefill"] += 1
+        # BK 128 for the down projection (K 17408): 0.95-1.0x of MLX's time vs up to 1.09x with 64.
+        tile = (64, 64, 128 if k >= 16384 else 64, 2, 2)
+        return prefill_kernel(k, self._n, self.group_size, x.dtype, tile)(x, self._wq2, self._sp2, self._bp2)
     STATS["multi"] += 1
     bm, nsg, bk = MULTI_TILE
     return nax_multi_kernel(sh[-1], self._n, self.group_size, bm, nsg, x.dtype, bk)(x, self._wq2, self._sp2, self._bp2)

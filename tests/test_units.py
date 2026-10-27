@@ -85,3 +85,26 @@ def test_gpu_problem():
     assert "M1-M4" in gpu_problem("26.2", "applegpu_g16s", "Apple M4 Max")
     assert "macOS 15.5" in gpu_problem("15.5", "applegpu_g17s", "Apple M5")
     assert gpu_problem("26.2", None, "unknown")
+
+
+@pytest.mark.parametrize("m", [64, 100, 2048])
+@pytest.mark.parametrize("k, n, bk", [(512, 128, 64), (1024, 192, 128)])
+def test_prefill_kernel(m, k, n, bk):
+    """Bit-identical to mx.quantized_matmul where MLX runs its NAX GEMM (here 2048
+    rows of the larger shape); where it picks another kernel, no further from a
+    float32 reference than MLX's own result."""
+    import mlx.core as mx
+
+    from mlx_tree_spec.qmm_packed import pack_nax, prefill_kernel
+
+    mx.random.seed(0)
+    wq, s, b = mx.quantize((mx.random.normal((n, k)) * 0.02).astype(mx.bfloat16), group_size=64, bits=4)
+    x = (mx.random.normal((1, m, k)) * 0.5).astype(mx.bfloat16)
+    ref = mx.quantized_matmul(x, wq, s, b, transpose=True, group_size=64, bits=4)
+    y = prefill_kernel(k, n, 64, mx.bfloat16, (64, 64, bk, 2, 2))(x, *pack_nax(wq, s, b))
+    assert y.shape == ref.shape
+    if (k, m) == (1024, 2048):
+        assert mx.array_equal(y, ref).item()
+    exact = x.astype(mx.float32) @ mx.dequantize(wq, s, b, group_size=64, bits=4).astype(mx.float32).T
+    err = lambda a: mx.abs(a.astype(mx.float32) - exact).max().item()
+    assert err(y) <= err(ref) * 1.01

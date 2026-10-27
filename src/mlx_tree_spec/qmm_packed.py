@@ -556,3 +556,170 @@ def qmv_packed(x2: mx.array, wq2, sp2, bp2, n: int, group_size: int, *, split: i
     m, k = x2.shape
     return _qmv_kernel(k, n, group_size, m, split, rpl, x2.dtype)(x2, wq2, sp2, bp2)
 
+
+
+# ------------------------------------------------------------- prefill GEMM
+# MLX's own prefill kernel (affine_qmm_t_nax in quantized_nax.h) with its weight
+# loader swapped for one that reads the pack_nax() layout. A threadgroup of
+# WM x WN simdgroups owns a BM x BN output tile; per BK step its threads
+# dequantize the BN x BK weight block into threadgroup memory (one 16-wide K
+# block of one row each, an 8-byte read: a simdgroup reads 256 contiguous bytes)
+# and every simdgroup multiplies its SM x SN subtile on the NAX tiles. Unlike the
+# multi-row NAX kernel above, each weight is dequantized once per BM rows, not
+# per 32, and K isn't split across simdgroups. The NAX tile helpers are MLX's
+# (steel/gemm/nax.h), inlined from the installed package: custom kernels are
+# compiled from source without MLX's include path.
+
+_STEEL_HEADERS = (
+    "steel/defines.h",
+    "steel/utils/type_traits.h",
+    "steel/utils/integral_constant.h",
+    "steel/gemm/nax.h",
+)
+
+_PREFILL_IMPL = """
+using namespace mlx::steel;
+
+template <typename T, int K, int N, int GS, int BM, int BN, int BK, int WM, int WN, bool aligned_m>
+METAL_FUNC void qmm_prefill_packed(
+    const device T* x, const device uint32_t* wq2, const device T* sp2, const device T* bp2,
+    device T* y, threadgroup T* Ws, const int M, const int sgp_sm,
+    const int y_row, const int y_col, const ushort sg, const ushort lane) {
+  constexpr int BK_PAD = BK + 16 / sizeof(T);
+  constexpr int KB16 = K / 16;
+  constexpr int G = K / GS;
+  constexpr int NT = WM * WN * 32;
+  constexpr int ITEMS = BN * (BK / 16);       // (row, 16-wide K block) pairs per step
+  static_assert(ITEMS % NT == 0, "loader items must split evenly");
+  constexpr int LOADS = ITEMS / NT;
+  constexpr int SM = BM / WM, SN = BN / WN, SK = 32;
+  constexpr int TM = SM / 16, TN = SN / 16, TK = SK / 16;
+  static_assert(GS % BK == 0 || BK % GS == 0, "group size vs BK");
+
+  const int t = int(sg) * 32 + int(lane);
+  const device uint2* wsrc[LOADS];
+  const device T* ssrc[LOADS];
+  const device T* bsrc[LOADS];
+  threadgroup T* wdst[LOADS];
+  int kbo[LOADS];
+  _Pragma("unroll")
+  for (int i = 0; i < LOADS; ++i) {
+    const int w = t + i * NT;
+    const int r32 = w % 32, rest = w / 32;
+    const int toff = rest % (BN / 32);
+    kbo[i] = rest / (BN / 32);
+    const int tile = y_col / 32 + toff;
+    wsrc[i] = (const device uint2*)wq2 + (size_t(tile) * KB16 + kbo[i]) * 32 + r32;
+    ssrc[i] = sp2 + size_t(tile) * G * 32 + r32;
+    bsrc[i] = bp2 + size_t(tile) * G * 32 + r32;
+    wdst[i] = Ws + (toff * 32 + r32) * BK_PAD + kbo[i] * 16;
+  }
+
+  const short tm = SM * (sg / WN);
+  const short tn = SN * (sg % WN);
+  x += size_t(y_row + tm) * K;
+
+  NAXTile<float, TM, TN> Dtile;
+  Dtile.clear();
+
+  for (int k = 0; k < K; k += BK) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    _Pragma("unroll")
+    for (int i = 0; i < LOADS; ++i) {
+      const uint2 p = wsrc[i][(k / 16) * 32];
+      const int g = (k + kbo[i] * 16) / GS;
+      const float s = float(ssrc[i][g * 32]);
+      const float b = float(bsrc[i][g * 32]);
+      _Pragma("unroll")
+      for (int ki = 0; ki < 8; ++ki) {
+        wdst[i][ki] = T(float((p.x >> (ki * 4)) & 0xFu) * s + b);
+        wdst[i][8 + ki] = T(float((p.y >> (ki * 4)) & 0xFu) * s + b);
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    STEEL_PRAGMA_NO_UNROLL
+    for (int kk1 = 0; kk1 < BK; kk1 += SK) {
+      NAXTile<T, TM, TK> Atile;
+      NAXTile<T, TN, TK> Btile;
+      volatile int compiler_barrier;
+      if (aligned_m) {
+        Atile.load(x + kk1, K);
+      } else {
+        Atile.load_safe(x + kk1, K, short2(SK, sgp_sm));
+      }
+      Btile.template load<T, BK_PAD, 1>(Ws + tn * BK_PAD + kk1);
+      tile_matmad_nax(Dtile, Atile, metal::bool_constant<false>{}, Btile, metal::bool_constant<true>{});
+      (void)compiler_barrier;
+    }
+    x += BK;
+  }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  device T* yt = y + size_t(y_row + tm) * N + y_col + tn;
+  if (aligned_m) {
+    Dtile.store(yt, N);
+  } else if (sgp_sm > 0) {
+    Dtile.store_safe(yt, N, short2(SN, sgp_sm));
+  }
+}
+"""
+
+_PREFILL_SOURCE = """
+threadgroup T Ws[BN * (BK + 16 / sizeof(T))];
+const int M = int(M_size);
+const int y_row = int(threadgroup_position_in_grid.y) * BM;
+const int y_col = int(threadgroup_position_in_grid.x) * BN;
+const ushort sg = simdgroup_index_in_threadgroup;
+const ushort lane = thread_index_in_simdgroup;
+const int sgp_sm = min(BM / WM, M - (y_row + (BM / WM) * int(sg / WN)));
+if (sgp_sm == BM / WM) {
+  qmm_prefill_packed<T, K, N, GS, BM, BN, BK, WM, WN, true>(x, wq2, sp2, bp2, y, Ws, M, sgp_sm, y_row, y_col, sg, lane);
+} else {
+  qmm_prefill_packed<T, K, N, GS, BM, BN, BK, WM, WN, false>(x, wq2, sp2, bp2, y, Ws, M, sgp_sm, y_row, y_col, sg, lane);
+}
+"""
+
+
+@lru_cache(maxsize=None)
+def _steel_header() -> str:
+    import os
+    import re
+
+    root = os.path.join(os.path.dirname(mx.__file__), "include", "mlx", "backend", "metal", "kernels")
+    parts = []
+    for rel in _STEEL_HEADERS:
+        with open(os.path.join(root, rel)) as f:
+            src = f.read()
+        parts.append(re.sub(r'^\s*(#pragma once|#include "mlx/.*")\s*$', "", src, flags=re.MULTILINE))
+    return "\n".join(parts) + _PREFILL_IMPL
+
+
+PREFILL_TILE = (64, 64, 32, 2, 2)  # (BM, BN, BK, WM, WN): MLX's affine_qmm_t_nax default
+
+
+@lru_cache(maxsize=None)
+def prefill_kernel(k: int, n: int, group_size: int, dtype, tile: tuple = PREFILL_TILE):
+    """y = x @ W.T for any number of rows of x (..., K), W packed by pack_nax()."""
+    bm, bn, bk, wm, wn = tile
+    assert n % bn == 0 and k % bk == 0 and bn % 32 == 0 and bk % 16 == 0
+    consts = (
+        f"typedef {_MSL_TYPE[dtype]} T;\n"
+        + "".join(f"constexpr int {a} = {v};\n" for a, v in
+                  (("K", k), ("N", n), ("GS", group_size), ("BM", bm), ("BN", bn), ("BK", bk), ("WM", wm), ("WN", wn)))
+    )
+    kern = mx.fast.metal_kernel(
+        name=f"tree_spec_prefill_packed_k{k}_n{n}_g{group_size}_{bm}x{bn}x{bk}_{wm}x{wn}_{_MSL_TYPE[dtype]}",
+        input_names=["x", "wq2", "sp2", "bp2", "M_size"],
+        output_names=["y"],
+        source=consts + _PREFILL_SOURCE,
+        header=_steel_header(),
+    )
+    nt = 32 * wm * wn
+
+    def run(x, wq2, sp2, bp2):
+        m = x.size // k
+        return kern(inputs=[x, wq2, sp2, bp2, m], grid=(nt * (n // bn), -(-m // bm), 1), threadgroup=(nt, 1, 1),
+                    output_shapes=[(*x.shape[:-1], n)], output_dtypes=[dtype])[0]
+
+    return run

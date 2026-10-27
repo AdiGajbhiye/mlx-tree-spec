@@ -9,6 +9,7 @@ PORT=8000
 PY=$HOME/.local/share/mlx-dspark/.venv/bin/python
 MTPLX=$HOME/.local/share/mtplx/.venv/bin/mtplx
 DSPARK=$HOME/.local/share/mlx-dspark/.venv/bin/mlx-dspark
+TREE=$HOME/projects/mlx-tree-spec/.venv/bin/mlx-tree-spec-server  # this repo's server
 SWIFT_MLX=$HOME/models/swift15-mlx/Swift-1.5-4bit-MLX
 SWIFT_MLX_TEXT=$HOME/models/swift15-mlx/Swift-1.5-4bit-MLX-text  # vision tensors stripped; MTPLX rejects them
 SWIFT_AX=$HOME/models/swift15-mlx/AX-Swift-1.5-MXFP4-MTP
@@ -46,11 +47,15 @@ server_cmd() {
     Q3b) echo "$HOME/.local/share/mlx-dspark/.venv/bin/python -m mlx_lm server --model mlx-community/Qwen3.8-27B-4bit --prompt-cache-size 1 --port $PORT" ;;
     Q4) echo "$MTPLX serve --model $BASE/mtplx-bare-speed --generation-mode ar --no-mtp --profile sustained --ssd-session-cache off --no-auth --yes --port $PORT" ;;
     Q5) echo "env MTPLX_CONTEXT_COPY=0 $MTPLX serve --model $BASE/mtplx-bare-speed --generation-mode mtp --mtp --depth 3 --profile sustained --ssd-session-cache off --no-auth --yes --port $PORT" ;;
+    # mlx-tree-spec (this repo), shipped defaults: tree-speculative decoding with the MTP head drafting.
+    # Measures cost curves for ~40 s before it listens. No prefix reuse here: the nonce leads every prompt.
+    T1) echo "$TREE --model $SWIFT_MLX_TEXT --port $PORT" ;;  # vs C2 / C2n
+    T2) echo "$TREE --model $BASE/mtplx-bare-speed --port $PORT" ;;  # vs Q5 (Q4 for plain decoding)
   esac
 }
 
 model_for() {  # some servers (mlx-lm, lithos) reject unknown model names
-  case "$1" in A*) echo nvidia/Qwen3.8-27B-NVFP4 ;; B*|Q3|Q3b) echo mlx-community/Qwen3.8-27B-4bit ;; C3) echo "$SWIFT_MLX" ;; *) echo local ;; esac
+  case "$1" in A*) echo nvidia/Qwen3.8-27B-NVFP4 ;; B*|Q3|Q3b) echo mlx-community/Qwen3.8-27B-4bit ;; C3) echo "$SWIFT_MLX" ;; T*) echo local ;; *) echo local ;; esac
 }
 
 bench_args_for() {
@@ -58,7 +63,7 @@ bench_args_for() {
   case "$1" in A*) echo "--strict-openai --contexts 128,1024" ;; esac
 }
 
-tokenizer_for() { case "$1" in A*|B*|Q*) echo "$QWEN_TOK" ;; *) echo "$SWIFT_TOK" ;; esac; }
+tokenizer_for() { case "$1" in A*|B*|Q*|T2) echo "$QWEN_TOK" ;; *) echo "$SWIFT_TOK" ;; esac; }
 
 free_port() {
   lsof -ti tcp:$PORT -sTCP:LISTEN | xargs kill 2>/dev/null
@@ -100,7 +105,7 @@ for L in "${LABELS[@]}"; do
     echo "$L FAILED to become ready (see logs/$L.server.log)" | tee -a logs/run_all.log
   fi
   kill $spid 2>/dev/null; pkill -P $spid 2>/dev/null
-  [ "${L:0:1}" = C ] || [ "${L:0:1}" = E ] || [ "$L" = Q4 ] || [ "$L" = Q5 ] && $MTPLX stop --port $PORT >/dev/null 2>&1
+  case "$L" in C*|E*|Q4|Q5) $MTPLX stop --port $PORT >/dev/null 2>&1 ;; esac  # MTPLX only, not T*
   free_port
   sleep 60  # cool down between configs
 done

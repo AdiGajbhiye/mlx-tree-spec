@@ -5,26 +5,61 @@ OpenAI-compatible server. It builds on [MTPLX](https://github.com/youssofal/mtpl
 kernels: the model's own multi-token-prediction (MTP) head drafts a small **tree** of candidate
 continuations instead of one chain, and the target verifies all branches in one pass.
 
-On an M5 Max this decodes a 27B model at **60–112 tok/s for one request, even at 28K context**
-(plain decoding: 21–24 tok/s), and **128 tok/s total with 4 requests at once**.
+On an M5 Max, for one request, this decodes the 27B model **about 1.4x faster than MTPLX's own
+MTP decoding** in the same benchmark harness (1.24–1.82x across contexts and tasks). It is
+2.6–3.2x faster than plain decoding, and still does **56 tok/s at 32K context**. With **4 requests
+at once** it does **128 tok/s total**.
 
 > Status: research code that has run a few hundred agentic-coding sessions. Measured on one
 > machine (M5 Max, 36 GB). Expect rough edges.
 
 ## Results
 
-M5 Max (36 GB), Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy, one request, tok/s:
+**Against MTPLX's MTP decoding.** These runs use the runtime harness in
+[bench/runtimes](bench/runtimes): greedy decoding, thinking off, 512 new tokens, a unique nonce in
+every prompt so no server can reuse a cached prefix, and one request at a time. The model is
+stock Qwen3.8-27B 4-bit (the default download). MTPLX ran MTP at depth 3. Decode tok/s:
 
-| scenario | plain decoding | MTP chain | MTP tree (this repo) |
-|---|---:|---:|---:|
-| summarize a codebase (27.9K-token prompt) | 21.6 | 58.2 | **60.9** |
-| summarize a manual (27.9K-token prompt) | 21.5 | 62.5 | **63.0** |
-| write a module (0.2K → 8.4K tokens) | 23.6 | 97.2 | **102.1** |
-| write tests (15.1K → 19.2K tokens) | 22.5 | 111.7 | **111.9** |
+| context | 128 | 1K | 4K | 8K | 16K | 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| plain decoding (MTPLX, no MTP) | 24.6 | 24.5 | 24.0 | 23.5 | 22.7 | 21.6 |
+| MTPLX, MTP chain | 51.8 | 54.4 | 54.3 | 54.1 | 47.0 | 40.0 |
+| this server | **75.4** | **75.8** | **73.9** | **76.2** | **61.9** | **56.5** |
 
-"MTP chain" is this repo's adaptive single-chain drafter with the same kernels, so the gap to
-it is what the tree itself adds; most of the gain over plain decoding is shared by both. Runs
-vary about ±3%. Raw results: [results/scenarios](results/scenarios).
+| task (S2) | code | prose | math | json | edit | creative |
+|---|---:|---:|---:|---:|---:|---:|
+| MTPLX, MTP chain | 61.0 | 48.5 | 62.2 | 66.2 | 69.7 | 39.8 |
+| this server | **86.0** | **63.4** | **100.6** | **103.4** | **127.1** | **51.4** |
+
+Swift 1.5 (a Qwen3.8-27B fine-tune) gives the same picture: 1.28–1.47x over MTPLX's MTP across
+contexts.
+
+The one exception is MTPLX's "context copy" mode, which drafts by copying spans straight out of
+the prompt. On a task whose answer is mostly the prompt's own file, it reaches 158 tok/s against
+this server's 127. Time to first token is 10% faster than MTPLX's at 128 tokens, equal at 1K,
+and 2–3% slower from 4K up (0.1–1.2 s), because prefill unpacks the packed 4-bit weights for each
+long chunk. The server also takes ~40 s to start, because it measures its cost curves first,
+against MTPLX's ~10 s.
+
+All tables are in [bench/runtimes/summary-tree.md](bench/runtimes/summary-tree.md). The MTPLX
+rows were measured two days before the tree rows.
+
+**Long-context scenarios.** One request, greedy, tok/s, using the best tree shape for each
+scenario:
+
+| scenario | plain decoding | MTP chain | MTP tree | MTP tree, Swift 1.5 |
+|---|---:|---:|---:|---:|
+| summarize a codebase (27.9K-token prompt) | 21.2 | 54.8 | **56.9** | 60.9 |
+| summarize a manual (27.9K-token prompt) | 21.2 | 61.5 | **64.1** | 63.0 |
+| write a module (0.2K → 8.4K tokens) | 23.7 | 96.2 | **99.0** | 102.1 |
+| write tests (15.1K → 19.2K tokens) | 22.6 | 88.4 | **92.3** | 111.9 |
+
+"MTP chain" is this repo's adaptive single-chain drafter running on the same kernels, so the gap
+between it and the tree is what the tree itself adds. Most of the gain over plain decoding comes
+from what the two share: MTP drafting and kernels tuned for the verify pass. Runs vary by about
+±3%. On "write tests", the stock model has fewer drafted tokens accepted per step than Swift 1.5
+(about 5.9 against 7.5), which is why it's slower there. Raw results are in
+[results/scenarios](results/scenarios).
 
 **Batching** (decode only, greedy): 1 request 59–85 tok/s; 2 together 92, 3: 108, 4: 128 tok/s
 total. Requests share every matmul, norm and MLP and the draft head; only the linear-attention
@@ -97,7 +132,9 @@ by default (the model's chat template). The reasoning comes back in `message.rea
 and `--default-effort` sets `reasoning_effort` for requests that send none. `"stream": true` sends
 server-sent events with one chunk per decode step, i.e. every token accepted in that step. The
 reasoning arrives as `delta.reasoning_content`, and `stream_options.include_usage` adds a final
-usage chunk. `--help` lists the options.
+usage chunk. For 10 minutes after each request, the idle server runs a tiny GPU kernel every
+second, so macOS keeps the weights resident and the next prefill doesn't pay ~0.2 s to restore
+them; `--keepalive-window 0` turns this off. `--help` lists the options.
 
 Run the tests (the lossless check loads the model):
 
@@ -111,10 +148,12 @@ MLX_TREE_SPEC_MODEL=Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed .venv/bin/pytest
 - Only the Qwen3.8-27B architecture (hybrid GatedDeltaNet with an MTP head) loaded through MTPLX.
 - **Greedy output is not token-for-token identical to plain decoding.** Verify passes run 8–16
   rows through different kernels than one-token decoding, so bf16 rounding flips near-ties and
-  the texts drift apart. In the saved benchmark runs about half the outputs diverge, some within
-  the first 20 tokens. `tests/test_lossless.py` re-scores the output in one teacher-forced pass and
+  the texts drift apart. In the saved benchmark runs half or more of the outputs diverge, some
+  within the first 20 tokens. `tests/test_lossless.py` re-scores the output in one teacher-forced pass and
   checks that every emitted token is the target's own top choice, up to such near-ties. Task
   quality held in the eval above (30/30 vs the MTPLX baseline's 29/30).
+- Prefill of long prompts is 2–3% slower than MTPLX's, because the packed weights are unpacked for
+  each 2048-token chunk. Startup takes ~40 s because the server measures its cost curves first.
 - Greedy decoding at around 9K context isn't exactly repeatable from run to run, even with
   plain decoding; the cause isn't found yet.
 
@@ -124,7 +163,7 @@ MLX_TREE_SPEC_MODEL=Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed .venv/bin/pytest
 src/mlx_tree_spec/   server, decoder (tree_spec, tree_verify) and Metal kernels
 tests/               unit tests; lossless check against plain greedy decoding
 bench/prompts/       long-context benchmark scenarios
-bench/runtimes/      the llama.cpp / MTPLX / mlx-lm / DSpark comparison harness and its results
+bench/runtimes/      the comparison harness (this server, llama.cpp, MTPLX, mlx-lm, DSpark) and its results
 experiments/         one-off probes kept for reference (rank probe, draft vocab builder, ...)
 results/             raw JSON behind the numbers above
 docs/devlog.md       development log

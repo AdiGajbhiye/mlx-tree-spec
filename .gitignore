@@ -13,6 +13,7 @@ runs/
 *.jsonl
 !bench/runtimes/results.jsonl
 !bench/runtimes/results-base.jsonl
+!bench/runtimes/results-tree.jsonl
 
 # Separate research (base Qwen stop-thinking probe); not part of the release
 base_traces/

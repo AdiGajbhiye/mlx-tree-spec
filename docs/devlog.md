@@ -1,10 +1,71 @@
 # Development log
 
-Measurements from building the decoder, newest first. All on one M5 Max (36 GB) with Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy unless noted. Raw JSON for the scenario sweeps is in [results/](../results); the agentic coding eval mentioned below is a separate private suite (10 coding-agent tasks, 3 trials each, pass/fail graded) and is not part of this repo.
+Measurements from building the decoder, newest first. All on one M5 Max (36 GB) with Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy, unless noted. Raw JSON for the scenario sweeps is in [results/](../results); the agentic coding eval mentioned below is a separate private suite (10 coding-agent tasks, 3 trials each, pass/fail graded) and is not part of this repo.
+
+# Prefill: idle residency and weight unpacking (2026-10-27)
+
+The first S1 run (below) showed the tree server 0.1-1.4 s slower to the first token than MTPLX. There were two causes.
+
+**Metal residency lost after idle (fixed).** macOS drops an idle process's Metal residency ~2.5 s after its last command buffer. The next submit pays ~10 ms per GiB to restore it. `bench.py` sleeps 3 s between runs, so every run except the first after warm-up paid it. MTPLX's sources describe the same effect (`model_scheduler.arm_idle_keepalive`) and avoid it with a 64x64 matmul every 1 s while idle. In-process, with nothing between prefills except the gap:
+- 200 tokens: 337-351 ms after 0-2 s of idle, 481-539 ms after 3 s.
+- 970 tokens: 1,359-1,386 ms after 0-2 s, 1,539-1,571 ms after 3 s.
+
+The server now does the same: a 64x64 matmul each second while idle, for `--keepalive-window` (default 600 s) after the last request. Through the server with 3-6 s gaps, 200-token prefill went from 457-552 to 324-373 ms and 970-token prefill from ~1,580 to ~1,380 ms.
+
+Ruled out:
+- the MTP-head pass over the prompt (under 1%);
+- Python GC (0 ms inside prefill);
+- snapshot copies (none taken);
+- streaming;
+- lingering handler threads (all idle).
+
+**Unpacking the packed weights (open, see Open).** Prompts of 320+ rows per chunk rebuild each 4-bit weight in MLX's layout per forward pass. Same model, one process, stock MLX kernels vs packed:
+- 200 tokens: 350 vs 336 ms (the NAX multi-tile path is 4% faster);
+- 1,024 tokens: 1,268 vs 1,390 ms (+9.6%);
+- 4,096 tokens: 5,284 vs 5,566 ms (+5.3%);
+- 8,192 tokens: 11,001 vs 11,361 ms (+3.3%).
+
+# Like-for-like runs against MTPLX, and the stock model (2026-10-27)
+
+**bench/runtimes S1/S2** (now possible because the server streams). New labels in `run_all.sh`: T1 is the tree server with shipped defaults on Swift 1.5 4-bit text (the same build as C2), and T2 is the same on stock Qwen3.8 bare-speed (the same build as Q5). Raw rows are in `bench/runtimes/results-tree.jsonl`; all tables are in `bench/runtimes/summary-tree.md`, written by `compare_tree.py`. Settings: greedy, thinking off, 512 tokens, nonce-led prompts (cached_tokens was 0 on every request), one request at a time. The MTPLX rows date from 2026-10-25.
+
+The tree rows were measured twice:
+- first without the idle keepalive (swap flat at 759.94M);
+- then again with it (swap flat at 743.94M). The numbers below and in the summary are from this second run.
+
+Decode speeds matched between the two runs within noise; only TTFT changed.
+
+Decode tok/s, tree / MTPLX MTP depth 3:
+- S1, stock model, 128 to 32K context: 75.4 / 75.8 / 73.9 / 76.2 / 61.9 / 56.5 vs Q5 51.8 / 54.4 / 54.3 / 54.1 / 47.0 / 40.0, i.e. 1.32-1.45x.
+- S1, Swift: 1.28-1.47x vs C2 and 1.30-1.46x vs C2n.
+- S2 vs Q5 (stock model): code 1.41x, prose 1.31x, math 1.62x, json 1.56x, edit 1.82x, creative 1.29x.
+- S2, Swift: T1 vs C2 is 1.29-1.62x, except edit at 0.80x. C2's context copy drafts spans from the prompt, which reaches 158 tok/s on a task that rewrites the prompt's file. Against C2n (no copy) the edit task is 1.82x.
+- Tokens per target pass (Swift, S2): tree 4.65 / 3.30 / 5.46 / 6.25 / 7.95 / 2.57 vs C2n 3.31 / 2.64 / 3.59 / 3.73 / 3.98 / 2.26.
+
+Costs:
+- TTFT relative to MTPLX (>1 is faster) with the keepalive: 1.10-1.12x at 128, 1.00-1.01x at 1K, 0.97-0.98x from 4K up, i.e. 0.1-1.2 s slower. The remaining gap is the unpacking above.
+- Without the keepalive TTFT was 0.78-0.98x.
+- Load takes 40 s (34 s of it is cost curves) vs MTPLX's 10 s.
+- Single tree runs vary more than MTPLX's (e.g. T2 at 8K in the first run: 77.6 / 64.3 / 77.8). Cells are medians of 3 runs (2 at 32K).
+
+**Scenario sweep on the stock model** (`results/scenarios/scenarios_base_v1.json`; the same command and configs as the v3 sweep, with `--model ~/models/qwen38-base/mtplx-bare-speed --flash-attn --curve-context --cache-limit-gb 4`). Plain / adaptive chain / fork chain+siblings / fork full, tok/s:
+
+| scenario | stock Qwen3.8 | Swift 1.5 (v3) |
+|---|---|---|
+| summarize codebase (27.9K) | 21.2 / 54.8 / 55.0 / **56.9** | 21.5 / 58.2 / **60.9** / 56.3 |
+| summarize manual (27.9K) | 21.2 / 61.5 / 63.1 / **64.1** | 21.2 / 62.5 / **63.0** / 62.7 |
+| write module (0.2K -> 8.4K) | 23.7 / 96.2 / 98.3 / **99.0** | 23.9 / 97.2 / 96.3 / **102.1** |
+| rewrite file (11K, 137 tok) | 23.2 / **134.9** / 124.2 / 125.0 | 23.0 / **134.0** / 129.7 / 128.1 |
+| write tests (15.1K -> 19.2K) | 22.6 / 88.4 / **92.3** / 87.0 | 22.7 / 111.7 / 111.8 / **111.9** |
+
+- Write tests is the one real gap. The stock model accepts ~5.9 tokens/step there against Swift's ~7.5. Every other scenario is within ~±10%, mostly within noise.
+- Outputs diverge from plain decoding earlier on the stock model: tokens 19-768. Rewrite file matches plain decoding exactly.
+- Summarize manual stops at EOS at 1992-2045 tokens, depending on the mode.
+- The first attempt was discarded because swap grew from 458M to 760M during load. The rerun ran with swap flat.
 
 # Comparison with MTPLX's own MTP decoding (2026-10-25)
 
-Only one matched comparison exists so far: the agentic eval below (same 10 tasks x 3), where the tree server
+Superseded by the bench/runtimes runs above. At the time, only one matched comparison existed: the agentic eval below (same 10 tasks x 3), where the tree server
 did +24% output tokens per second of model time sequentially (48.9 vs 39.4) and finished 2.1x sooner with 4
 sessions in parallel (29.2 vs 62.4 min). The MTPLX run used the AX MXFP4 build and the tree server the 4-bit
 affine build; MTPLX itself is 10-15% faster on the 4-bit build in `bench/runtimes`, so part of the +24% is the
@@ -97,7 +158,9 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - End to end: plain decoding +1%; speculative configs within noise (-3% to +2%). Worth it for memory, not speed. Outputs first differ from bf16 KV after ~110-1450 tokens.
 
 ## Open
-- Run the tree server through `bench/runtimes` S1/S2 on Swift 1.5 4-bit (same build as config C2) for a like-for-like table against MTPLX MTP.
+- **Next optimization: a prefill kernel on the packed layout.** Prompts of 320+ rows per chunk rebuild every 4-bit weight in MLX's layout for each forward (`packed_linear._unpacked`) and then call `mx.quantized_matmul`. That costs ~100-120 ms per 2048-token forward and makes prefill 3-10% slower than MLX's stock kernels on the same model: +9.6% at 1K, +5.3% at 4K, +3.3% at 8K. Below 320 rows the NAX multi-tile kernel is already 4% faster than stock. Keeping both layouts would cost ~14 GB, which won't fit on 36 GB. Options:
+  - a GEMM kernel that reads the packed layout at `quantized_matmul` speed (the NAX tile is ~1.2x slower at 2048 rows);
+  - unpacking once per layer per request instead of once per chunk. That only helps prompts longer than 2048 tokens, and the layer-major attempt in round 3 didn't help.
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.
 - Drafting one chain at 27.9K still costs ~2 ms per MTP call (vs 1.2 at short context).
 

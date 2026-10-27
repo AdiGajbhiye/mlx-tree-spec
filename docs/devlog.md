@@ -164,8 +164,8 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.
 - Drafting one chain at 27.9K still costs ~2 ms per MTP call (vs 1.2 at short context).
 
-## Constrained decoding for the agent harness (not started)
-The state-machine harness (`~/projects/state-machine-harness`) rejects about 3% of replies and asks again, costing a whole extra call each time. In an audit of 132 runs, 13 of 27 rejects were a fact citing a file the agent never read, 9 a fact in the wrong shape, and 4 a removal of a fact or plan item that doesn't exist. A grammar applied while decoding makes all of these impossible to generate.
+## Constrained decoding for agent harnesses (not started)
+An agent harness that validates each structured reply rejects about 3% of them and asks again, costing a whole extra call each time. Most rejects are a value that isn't valid at that step (e.g. citing a file the agent never read) or a reply in the wrong shape. A grammar applied while decoding makes these impossible to generate.
 - Request field: `grammar` (a JSON schema, or a TypeScript-subset grammar if the harness moves to writing programs) applied to the reply after `</think>`; thinking stays free.
 - Per-request value lists: the harness sends what is valid for this step, e.g. a fact's `from` must be one of the files read so far plus `search` | `command` | `note`, and plan ids must exist. The grammar is built for each request, so it can't be a fixed compiled schema.
 - Library: compare llguidance and xgrammar for MLX on the per-token cost of the mask over the 248K vocabulary, and the time to compile a per-request grammar.

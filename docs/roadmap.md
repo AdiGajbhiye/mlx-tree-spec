@@ -33,9 +33,13 @@ All numbers are from an M5 Max (36 GB), stock Qwen3.8-27B 4-bit, and the benchma
 - **Why:** with its Neural Engine off, Splash still reaches the first token ~8% sooner (44.7 vs
   48.5 s at 32K, 849 vs 794 tok/s at 4K). For agents with long prompts, the first token matters
   more than decode.
-- **Next:** profile one 2048-token chunk at 8K and 32K. Split the time into FFN (packed GEMM),
-  attention (prefill flash), the GatedDeltaNet chunked scan, and MTP, then work on the largest.
-- **Done when:** TTFT at 8K-32K drops by 5% or more, with the prefill result unchanged.
+- **Profiled** (devlog, 2026-10-30): matmuls are 65-85% of a chunk but already run at the rate
+  of MLX's dense GEMM (~43 TFLOP/s), and no tile shape helps. Attention grows from 2% to 23% of
+  a chunk between 0 and 24K context, at ~26 TFLOP/s. The GatedDeltaNet recurrence is ~9%.
+- **Next:** a prefill flash-attention kernel for head dim 256 that beats MLX's NAX one (~26
+  TFLOP/s), e.g. GQA-aware (one K/V tile for all 6 query heads of a group). A GEMM faster than
+  MLX's design would matter more, but would be a new kernel, not a retune.
+- **Done when:** TTFT at 16K-32K drops by 5% or more, with the prefill result unchanged.
 
 ### 4. A copy branch in the draft tree
 - **Why:** Splash's trained drafter accepts more tokens per pass on code and JSON (5.2 vs 4.7

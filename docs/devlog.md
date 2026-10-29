@@ -2,6 +2,24 @@
 
 Measurements from building the decoder, newest first. All on one M5 Max (36 GB) with Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy, unless noted. Raw JSON for the scenario sweeps is in [results/](../results); the agentic coding eval mentioned below is a separate private suite (10 coding-agent tasks, 3 trials each, pass/fail graded) and is not part of this repo.
 
+# Prefill profile: matmuls at the GEMM ceiling, attention the only headroom (2026-10-30)
+
+One 2048-token chunk (target forward + MTP head) as the server runs it, at 0 / 8K / 24K cached tokens (`bench/prefill/profile.py`; each call's inputs are evaluated before its timer starts, so lazily pending work is charged to whatever produced it):
+
+| ms | ctx 0 | 8K | 24K |
+|---|---:|---:|---:|
+| chunk (plain) | 2564 (799 tok/s) | 2908 (704 tok/s) | 3331 (615 tok/s) |
+| 4-bit matmuls (all) | 2383 | 2416 | 2536 |
+| attention, excluding its matmuls (16 layers) | 51 | 275 | 911 |
+| GatedDeltaNet, excluding matmuls (48 layers) | 289 | 295 | 321 |
+| FFN activation, norms, MTP, glue | ~125 | ~130 | ~140 |
+
+- **Matmuls are at the ceiling.** The packed 4-bit GEMM runs at 42.7 TFLOP/s on the FFN up shape, against 44.2 for MLX's dense bf16 matmul (and 43.4 for fp16). No tile shape beats the current one (`bench/prefill/tiles.py`: 10 shapes on 4 matmul shapes, all within ±3% or slower; 128x128 tiles are 25% slower).
+- **Attention is the part that grows**, and the only real headroom. Prefill chunks use MLX's NAX attention kernel (`steel_attention_dsplit…bd256`, also used for bf16) at ~26 TFLOP/s at every context, ~60% of the GEMM rate. At 24K it's 23% of the chunk. Reaching ~35 TFLOP/s would save ~7% of a 24K chunk and ~5% of the TTFT of a 32K prompt.
+- **MTPLX's blocked GatedDeltaNet prefill kernel** (`MTPLX_GDN_BLOCKED_PREFILL=1`, off in this server) is 2.4-3.2% faster per chunk in a same-process A/B (`bench/prefill/ab_gdn.py`). But the chunk's hidden states differ from mlx-lm's kernel by 3-7% relative, and GDN states by up to 0.46. That's far more than rounding, so it isn't worth 3%.
+- Separate runs of the same config drifted by up to 12% over this session (the machine after hours of benchmarks), so prefill changes need same-process A/B timing.
+- Against Splash with its Neural Engine off (7-8% faster at every context, so not context-dependent), the gap is in the matmuls or other per-token work. GGUF Q4_K kernels written for this GPU may beat MLX's GEMM design.
+
 # Grammar-constrained decoding (2026-10-30)
 
 `grammar.py`, llguidance 1.9. A request's `response_format` (`json_schema` / `json_object`) or `grammar` (`json_schema`, `lark`, `regex`) constrains its reply, after `</think>` when thinking is on.

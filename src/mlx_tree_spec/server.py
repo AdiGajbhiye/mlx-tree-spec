@@ -27,6 +27,9 @@ agent harnesses and other OpenAI-compatible clients:
     stream_options.include_usage adds a final usage chunk;
   - --trace-log appends each request's prompt and reply tokens, thinking and
     answer text (one JSON line per request) for offline analysis;
+  - `response_format` (json_schema / json_object, as in OpenAI's API) or `grammar`
+    ({"json_schema" | "lark" | "regex": ...}) constrains the reply (after </think>
+    when thinking) with llguidance, target-exact (grammar.py);
   - a body with "prompt_ids" instead of "messages" decodes those tokens as is
     (no chat template, no thinking split) and returns the reply tokens as
     "gen_ids" (used by label_checkpoints.py).
@@ -64,6 +67,7 @@ from pathlib import Path
 import mlx.core as mx
 from mlx_lm.models.cache import KVCache
 
+from . import grammar
 from . import kv8
 from . import long_attention
 from . import packed_linear
@@ -183,6 +187,7 @@ class Engine:
         self.store = (snapshot_store.SnapshotStore(snapshot_dir, setup_key(model_path), int(snapshot_disk_gb * 1e9))
                       if snapshot_disk_gb > 0 else None)
         self.hit = None  # where the last prefill resumed from: "memory", "disk" or None
+        self.grammars: grammar.Grammars | None = None  # built on the first request with a grammar
         self.user_turn = self.tok.encode("<|im_start|>user")
         self.recent: deque[list[int]] = deque(maxlen=RECENT)
         self.jobs: queue.Queue[Job] = queue.Queue()
@@ -230,12 +235,13 @@ class Engine:
         )
         return g
 
-    def prefill(self, prompt: list[int], temperature: float, stateless: bool):
+    def prefill(self, prompt: list[int], temperature: float, stateless: bool, constraint=None):
         """Target and MTP caches over `prompt`, resumed from the longest snapshot the
         prompt extends; new snapshots at the user-turn start and at the longest
         prefix shared with a recent prompt. MTP entry i pairs target hidden i with
         token i + 1, so each piece's last entry waits for the next piece (or the
-        first sampled token). Returns ForkState's state and the reused tokens."""
+        first sampled token). `constraint` (grammar.Constraint) constrains that
+        first token. Returns ForkState's state and the reused tokens."""
         t0 = time.perf_counter()
         hits = [] if stateless else [b for b in self.bank if len(b[0]) < len(prompt) and prompt[: len(b[0])] == b[0]]
         snap = max(hits, key=lambda b: len(b[0]), default=None)
@@ -279,6 +285,8 @@ class Engine:
                 if self.store:
                     self.store.queue(snap)
         bonus = int(tv.choose(logits[0, -1], temperature).item())
+        if constraint is not None:
+            bonus = constraint.choose(bonus, logits[0, -1], temperature)
         root_g = self._mtp(prev_h, [bonus], mtp_cache)[:, -1, :]
         mx.eval(root_g)
         if not stateless:
@@ -361,14 +369,30 @@ class Engine:
             thinking = self.tok.decode(prompt[-8:]).rstrip().endswith("<think>")
         temperature = float(body.get("temperature", 0.0) or 0.0)
         max_tokens = int(body.get("max_tokens") or body.get("max_completion_tokens") or 4096)
+        constraint = self._constraint(body, thinking)
         t0 = time.perf_counter()
-        state, cached = self.prefill(prompt, temperature, job.stateless)
+        state, cached = self.prefill(prompt, temperature, job.stateless, constraint)
         policy = tv.ForkPolicy(self.depth, self.branches, self.branch_depth, self.sibs, self.draft, self.curve, self.row_ms, self.long)
-        st = tv.ForkState(self.inner, self.drafter, max_tokens, self.eos, state, policy, temperature)
+        st = tv.ForkState(self.inner, self.drafter, max_tokens, self.eos, state, policy, temperature, constraint)
         meta = dict(prompt=prompt, thinking=thinking, temperature=temperature, cached=cached, cached_from=self.hit, t0=t0,
                     t_first=time.perf_counter(), batch=0, effort=kwargs.get("reasoning_effort"))
         job.thinking = thinking
         return st, meta
+
+    def _constraint(self, body: dict, thinking: bool):
+        """The request's grammar.Constraint, or None. With thinking on it applies from </think>."""
+        if body.get("grammar") is None and (body.get("response_format") or {}).get("type") in (None, "text"):
+            return None
+        try:
+            spec = grammar.grammar_spec(body)
+        except ImportError as e:
+            raise grammar.GrammarError("grammar-constrained decoding needs llguidance: pip install 'mlx-tree-spec[grammar]'") from e
+        if spec is None:
+            return None
+        if self.grammars is None:
+            eos = self.tok.convert_tokens_to_ids("<|im_end|>")
+            self.grammars = grammar.Grammars(self.tok._tokenizer, eos if isinstance(eos, int) else self.tok.eos_token_id)
+        return self.grammars.constraint(spec, self.eos, self.think_end, active=not thinking)
 
     def _emit(self, job: Job, st: tv.ForkState) -> None:
         """Hand a streaming job the reply tokens accepted since the last call, cut
@@ -406,6 +430,7 @@ class Engine:
             total_s=round(time.perf_counter() - meta["t0"], 3),
             decode_tok_s=round((len(out) - 1) / max(decode_s, 1e-9), 1), tokens_per_step=round(stats["tokens_per_step"], 2),
             finish="stop" if stopped else "length", temperature=meta["temperature"], thinking=thinking,
+            grammar_repicks=st.constraint.repicks if st.constraint else None,
             waiting=self.jobs.qsize(),
         )
         print(json.dumps(rec), flush=True)

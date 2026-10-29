@@ -196,3 +196,77 @@ def test_snapshot_store_budget_and_layout(tmp_path):
     n, f = store.find(list(range(100, 110)))
     assert store.load(f, list(range(100, 110)), [KVCache()], [KVCache()]) is None  # wrong layout: dropped
     assert not f.exists()
+
+
+class _EvenOnly:
+    """A stand-in grammar: only even tokens are allowed; tracks what was pushed."""
+
+    def __init__(self):
+        self.stack = []
+
+    def push(self, tok):
+        self.stack.append(tok)
+
+    def pop(self, n):
+        del self.stack[len(self.stack) - n:]
+
+
+def test_accept_path():
+    from mlx_tree_spec.tree_verify import accept_path
+
+    # node 0 (root) -> 1 -> 2 (main chain), 0 -> 3 (sibling); t = node tokens, p = target choices
+    paths = [[0, 1, 2], [0, 3]]
+    t = [10, 20, 30, 40]
+    assert accept_path(paths, t, [20, 30, 99, 0].__getitem__) == [0, 1, 2]
+    assert accept_path(paths, t, [40, 99, 99, 0].__getitem__) == [0, 3]
+    assert accept_path(paths, t, [99, 0, 0, 0].__getitem__) == [0]
+    con = _EvenOnly()
+    seen = []
+
+    def pick(v):  # the constraint's state when a node's choice is made: the path's tokens so far
+        seen.append((v, list(con.stack)))
+        return [20, 30, 99, 0][v]
+
+    assert accept_path(paths, t, pick, con) == [0, 1, 2] and con.stack == []
+    assert seen == [(0, []), (1, [20]), (0, [])]  # a leaf's own choice is made later, by ForkState.finish
+
+
+def test_grammar_constraint():
+    import os
+
+    import mlx.core as mx
+    import pytest
+
+    pytest.importorskip("llguidance")
+    path = os.path.expanduser(os.environ.get("MLX_TREE_SPEC_TOKENIZER", "~/models/qwen38-base/mtplx-bare-speed"))
+    if not os.path.exists(os.path.join(path, "tokenizer.json")):
+        pytest.skip("no Qwen3.8 tokenizer")
+    from transformers import AutoTokenizer
+
+    from mlx_tree_spec.grammar import Grammars, grammar_spec
+
+    hf = AutoTokenizer.from_pretrained(path)
+    eos = hf.convert_tokens_to_ids("<|im_end|>")
+    think_end = hf.convert_tokens_to_ids("</think>")
+    gs = Grammars(hf, eos)
+    spec = grammar_spec({"response_format": {"type": "json_schema", "json_schema": {"schema": {
+        "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}}}})
+    ids = hf.encode('{"ok": true}', add_special_tokens=False)
+    con = gs.constraint(spec, [eos], think_end, active=False)
+    assert con.allowed(5)  # thinking: anything goes
+    con.push(5)
+    con.push(think_end)
+    assert con.active and not con.allowed(hf.encode("hello", add_special_tokens=False)[0])
+    con.pop(2)
+    assert not con.active and con.allowed(5)
+    con.push(think_end)
+    con.commit()
+    # an unconstrained choice the grammar forbids is redone on the masked logits
+    logits = mx.zeros((len(hf) + 7,))  # padded past the vocabulary, like the model's
+    logits = logits.at[ids[0]].add(1.0).at[100].add(5.0)
+    assert con.choose(100, logits, 0.0) == ids[0] and con.masks == 1
+    for tok in ids:
+        assert con.allowed(tok)
+        con.push(tok)
+    assert con.allowed(eos) and not con.allowed(ids[0])  # complete: only the end of turn
+    assert con.choose(ids[0], logits, 0.0) == eos

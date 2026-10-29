@@ -2,6 +2,35 @@
 
 Measurements from building the decoder, newest first. All on one M5 Max (36 GB) with Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy, unless noted. Raw JSON for the scenario sweeps is in [results/](../results); the agentic coding eval mentioned below is a separate private suite (10 coding-agent tasks, 3 trials each, pass/fail graded) and is not part of this repo.
 
+# Grammar-constrained decoding (2026-10-30)
+
+`grammar.py`, llguidance 1.9. A request's `response_format` (`json_schema` / `json_object`) or `grammar` (`json_schema`, `lark`, `regex`) constrains its reply, after `</think>` when thinking is on.
+- Target-exact under the grammar: at every position the emitted token is the target's choice among the allowed tokens. In the accept walk (`tree_verify.accept_path`), a node's unconstrained choice that the grammar allows is also its constrained choice (the argmax over a set that contains the overall argmax), so only one llguidance check per walked node is needed. Only a disallowed choice computes the mask (0.06 ms for 248K tokens) and redoes the argmax on that node's logits, which `batch_pass` now also returns. For sampling, a disallowed draw is redrawn from the masked distribution, which gives exactly the masked distribution. The prefill's first token goes through the same check.
+- The matcher follows each candidate path with consume/rollback and commits the accepted one. A finished grammar stops the matcher, and from then only the end-of-turn token is allowed.
+- Server check: JSON schema with an enum and `maxItems`, the same schema with thinking on, a Lark `"yes" | "no"`, a regex date, `json_object`, an invalid grammar (400), and a constrained request batched with a free one. Every constrained reply parsed and matched its grammar. Greedy replies repeat exactly, and the free request in the batch gave the same text as alone.
+- Speed: the schema reply ran at 89.4 tok/s, 5.0 tokens/step, with 4 re-picks in 59 tokens; the free reply to the same prompt (fenced, more tags) ran at 81.2 tok/s, 4.94 tokens/step.
+- Not done: drafts the grammar forbids are still verified, then rejected, instead of being pruned before the pass, and forced spans aren't fast-forwarded (both need the drafted tokens on the CPU before the pass). When the grammar overrides the target's choice for the next root, that step's MTP hidden still pairs with the overridden token, which only costs acceptance on the next step.
+
+# Long-context attention kernel: five variants, none faster (2026-10-30)
+
+The verify pass's attention at 16-32K (tree_flash, MTPLX's NAX flash kernel with an ancestor mask) is the largest cost that grows with context. Benchmarks are in `bench/attn/` and need no model: 16 layers, 24 query heads, 4 KV heads, head dim 256, chains of n queries.
+
+| ms, 16 layers | n=1 | 2 | 4 | 8 | 12 | 16 |
+|---|---:|---:|---:|---:|---:|---:|
+| tree_flash, bf16, 32K | 6.8 | 6.9 | 7.9 | 10.6 | 15.9 | 18.7 |
+| tree_flash, kv8, 32K | 5.2 | 5.5 | 8.7 | 12.7 | 20.3 | 24.3 |
+| MLX `scaled_dot_product_attention` + mask, bf16, 32K | 6.0 | 9.7 | 16.9 | 41.6 | 53.8 | 28.7 |
+
+- Ceiling: reading 2.15 GB with `mx.sum` reaches ~400 GB/s, so 32K K+V takes at least ~5.4 ms. n=1 is near that (316 GB/s); from n=4 the time follows the number of 16-row simdgroups per KV head (6n rows: 1, 1, 2, 3, 5, 6 simdgroups).
+- Ablation at n=16, 32K (`ablate.py`), ms saved by removing: K and V loads 8.0, the PV matmul 4.9, the QK matmul 3.1. Each simdgroup streams the same K/V tiles from device memory on its own, and its loads are not coalesced (8 bytes per lane from rows 512 bytes apart).
+- Tried, all exact (bit-identical output), none faster:
+  - K and V tiles staged once per threadgroup in threadgroup memory with coalesced 16-byte loads (`staged.py`): 0.6-0.97x. The barriers serialise loads and matmuls that used to overlap across simdgroups.
+  - Launch shape, 32-256 key blocks x 1-4 key-split simdgroups (`sweep.py`, `blocks.py`): 64 blocks with no split is within 2-3% of the best everywhere.
+  - PV accumulators kept in matmul destination tensors across tiles, P converted once per tile instead of once per output group (`persist.py`): 0.97-1.0x. The compiler already removed those copies.
+  - 32 rows per simdgroup and half of D for P x V (`wide.py`): ~2.7x less K/V traffic per row, but 0.65-0.89x, presumably from register pressure.
+- What's left is a different kernel design rather than edits to this one, e.g. matmuls cooperative across simdgroups (`execution_simdgroups<N>`) on threadgroup tiles with asynchronous loads, so one K/V load serves all rows without barriers between load and compute.
+- The kv8 kernel is 15-30% slower than bf16 from 4 queries, which matches the -5% decode at 16K seen end to end with `--kv8`. A faster int8 path is worth more now that kv8 is the default.
+
 # Startup curve cache, prefix snapshots on disk, and a Neural Engine prefill test (2026-10-30)
 
 ## Saved cost curves
@@ -224,7 +253,8 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.
 - Drafting one chain at 27.9K still costs ~2 ms per MTP call (vs 1.2 at short context).
 
-## Constrained decoding for agent harnesses (not started)
+## Constrained decoding for agent harnesses (plan; version 1 built 2026-10-30, see "Grammar-constrained decoding" above)
+Version 1 takes a JSON schema, Lark grammar or regex per request, so per-request value lists can be written into the grammar. llguidance's mask costs 0.06 ms, so it is applied only where the target's choice is disallowed (the fallback in the last bullet), not for every drafted node. Draft pruning and forced spans are still open ([roadmap](roadmap.md), item 5).
 An agent harness that validates each structured reply rejects about 3% of them and asks again, costing a whole extra call each time. Most rejects are a value that isn't valid at that step (e.g. citing a file the agent never read) or a reply in the wrong shape. A grammar applied while decoding makes these impossible to generate.
 - Request field: `grammar` (a JSON schema, or a TypeScript-subset grammar if the harness moves to writing programs) applied to the reply after `</think>`; thinking stays free.
 - Per-request value lists: the harness sends what is valid for this step, e.g. a fact's `from` must be one of the files read so far plus `search` | `command` | `note`, and plan ids must exist. The grammar is built for each request, so it can't be a fixed compiled schema.

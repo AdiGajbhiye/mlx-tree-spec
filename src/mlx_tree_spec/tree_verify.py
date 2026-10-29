@@ -756,7 +756,7 @@ def choose(logits: mx.array, temperature: float = 0.0) -> mx.array:
 
 def _pass(rt, inner, drafter, tokens, cache, mtp_cache, tree: Tree, record: dict, temperature: float = 0.0):
     """One lazy tree pass: target preds per node, MTP hidden per node, and the
-    top-K next-root candidates (ids, log-probs) per node."""
+    top-K next-root candidates (ids, log-probs) per node (and the target logits)."""
     return batch_pass(rt, inner, drafter, tokens, [(0, tokens.shape[1], cache, mtp_cache, tree, record, temperature)])
 
 
@@ -784,7 +784,7 @@ def batch_pass(rt, inner, drafter, tokens, parts):
     idx, vals = mx.take_along_axis(idx, order, -1), mx.take_along_axis(vals, order, -1)
     if drafter.ids_arr is not None:
         idx = drafter.ids_arr[idx]
-    return preds, idx, vals, g
+    return preds, idx, vals, g, logits
 
 
 class DraftLevel:
@@ -882,16 +882,42 @@ def batch_draft(drafter, inner, jobs):
     return out
 
 
+def accept_path(paths, t: list[int], pick, con=None) -> list[int]:
+    """The accepted nodes: the longest prefix of any root-to-leaf path in `paths`
+    whose every next token t[child] is the target's choice pick(node). With a
+    grammar.Constraint `con`, its state follows each path walked (pick reads it)
+    and is left where it was."""
+    best_path, best_n = None, -1
+    for path in paths:
+        n = 0
+        while n + 1 < len(path) and t[path[n + 1]] == pick(path[n]):
+            n += 1
+            if con is not None:
+                con.push(t[path[n]])
+        if con is not None:
+            con.pop(n)
+        if n > best_n:
+            best_path, best_n = path, n
+    return list(best_path[: best_n + 1])
+
+
 class ForkState:
     """One request's tree-speculative decode, advanced a step at a time by
     batch_step (plan the shape, draft, build the tree, pass, accept and commit),
     so decode_fork and a batching server run the same per-request logic."""
 
-    def __init__(self, inner, drafter, max_new: int, eos, state, policy: ForkPolicy, temperature: float = 0.0):
+    def __init__(self, inner, drafter, max_new: int, eos, state, policy: ForkPolicy, temperature: float = 0.0,
+                 constraint=None):
+        """`constraint`: a grammar.Constraint whose state is just before the first
+        token, which `state`'s bonus must already satisfy."""
         self.inner = inner
         self.cache, self.mtp_cache, self.bonus, self.root_g, self.prefill_s = state
         self.root_top = drafter.top(self.root_g, TOP_K)[0]
         self.max_new, self.eos, self.policy, self.temperature = max_new, eos, policy, temperature
+        self.constraint = constraint
+        if constraint is not None:
+            constraint.push(self.bonus)
+            constraint.commit()
         self.out = [self.bonus]
         self.steps = self.accepted = self.rows = self.nodes = self.alt_wins = self.sib_wins = 0
 
@@ -936,20 +962,32 @@ class ForkState:
         self.main_seconds = second
         self.off0, self.mtp_off0, self.record = _kv_offset(self.cache), self.mtp_cache[0].offset, {}
 
-    def finish(self, p: list[int], t: list[int], top_ids, top_lp, g, r0: int, step_ms: float | None) -> None:
+    def finish(self, p: list[int], t: list[int], top_ids, top_lp, g, r0: int, step_ms: float | None,
+               logits=None) -> None:
         """Accept the longest matching path of the finished pass (this request's
-        preds `p` and tokens `t`; its rows of the pass outputs start at r0),
-        commit it and learn from the step."""
-        tree, d1 = self.tree, self.shape[0]
-        best_path, best_n = None, -1
-        for path in tree.paths:
-            n = 0
-            while n + 1 < len(path) and t[path[n + 1]] == p[path[n]]:
-                n += 1
-            if n > best_n:
-                best_path, best_n = path, n
-        path = best_path[: best_n + 1]
-        new_bonus = p[path[-1]]
+        preds `p` and tokens `t`; its rows of the pass outputs, including the
+        target `logits`, start at r0), commit it and learn from the step. Under a
+        grammar the target's choice at each node is its choice among the allowed
+        tokens (grammar.Constraint.choose), found along each path walked."""
+        tree, d1, con = self.tree, self.shape[0], self.constraint
+        if con is None:
+            pick = p.__getitem__
+        else:
+            picks: dict[int, int] = {}  # a node's choice depends only on its own path
+
+            def pick(v: int) -> int:
+                if v not in picks:
+                    picks[v] = con.choose(p[v], logits[0, r0 + v], self.temperature)
+                return picks[v]
+        path = accept_path(tree.paths, t, pick, con)
+        best_n = len(path) - 1
+        if con is not None:
+            for v in path[1:]:
+                con.push(t[v])
+        new_bonus = pick(path[-1])
+        if con is not None:
+            con.push(new_bonus)
+            con.commit()
         commit(self.inner, self.cache, self.mtp_cache, self.record, self.off0, self.mtp_off0, path)
         mx.async_eval([c.state for c in self.cache], [c.state for c in self.mtp_cache])  # replay runs while we plan
         last = r0 + path[-1]
@@ -1027,12 +1065,12 @@ def batch_step(rt, inner, drafter, states: list[ForkState]) -> None:
         parts.append((r0, r0 + st.tree.n, st.cache, st.mtp_cache, st.tree, st.record, st.temperature))
         r0 += st.tree.n
     mx.async_eval(tokens)  # the GPU drafts while the pass graph is built
-    preds, top_ids, top_lp, g = batch_pass(rt, inner, drafter, tokens, parts)
+    preds, top_ids, top_lp, g, logits = batch_pass(rt, inner, drafter, tokens, parts)
     mx.eval(preds, tokens, top_ids, top_lp, *[st.main_seconds for st in states if st.main_seconds is not None])  # one sync
     p, t = preds.tolist(), tokens[0].tolist()
     step_ms = (time.perf_counter() - ta) * 1e3 if len(states) == 1 else None
     for (r0, r1, *_), st in zip(parts, states):
-        st.finish(p[r0:r1], t[r0:r1], top_ids, top_lp, g, r0, step_ms)
+        st.finish(p[r0:r1], t[r0:r1], top_ids, top_lp, g, r0, step_ms, logits)
 
 
 def decode_fork(

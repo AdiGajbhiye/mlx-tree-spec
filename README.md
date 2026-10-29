@@ -132,7 +132,7 @@ prefill included; not part of this repo):
   speed, not what gets generated.
 
 The development log with every measurement, including what didn't help, is in
-[docs/devlog.md](docs/devlog.md).
+[docs/devlog.md](docs/devlog.md). What could come next is in [docs/roadmap.md](docs/roadmap.md).
 
 ## Requirements
 
@@ -167,7 +167,12 @@ by default (the model's chat template). The reasoning comes back in `message.rea
 and `--default-effort` sets `reasoning_effort` for requests that send none. `"stream": true` sends
 server-sent events with one chunk per decode step, i.e. every token accepted in that step. The
 reasoning arrives as `delta.reasoning_content`, and `stream_options.include_usage` adds a final
-usage chunk. For 10 minutes after each request, the idle server runs a tiny GPU kernel every
+usage chunk. `response_format` (`json_schema` or `json_object`, as in OpenAI's API) or
+`grammar` (`{"json_schema": ...}`, `{"lark": "..."}` or `{"regex": "..."}`) constrains the reply,
+after `</think>` when thinking is on. This needs `uv pip install -e ".[grammar]"` (llguidance).
+Each emitted token is still the target's own choice, among the tokens the grammar allows, and
+decode speed is unchanged: a schema-constrained reply ran at 89 tok/s against 81 tok/s
+unconstrained. For 10 minutes after each request, the idle server runs a tiny GPU kernel every
 second, so macOS keeps the weights resident and the next prefill doesn't pay ~0.2 s to restore
 them; `--keepalive-window 0` turns this off. By default the attention KV cache switches to 8
 bits once a request passes 8K cached tokens: about 1 GB less per request at 32K, with speed

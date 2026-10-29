@@ -29,6 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8"]
+grammar = ["llguidance>=1.9,<2"]  # response_format / grammar requests (grammar.py)
 
 [project.scripts]
 mlx-tree-spec-server = "mlx_tree_spec.server:main"

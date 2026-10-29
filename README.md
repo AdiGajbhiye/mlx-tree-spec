@@ -39,7 +39,8 @@ the prompt. On a task whose answer is mostly the prompt's own file, it reaches 1
 this server's 129. Time to first token is shorter than with MTPLX's MTP at every context:
 17–21% at 128 tokens, 10% at 1K and 2–5% from 4K up (e.g. 48.0 vs 48.8 s at 32K on the stock
 model). Long prompts run a prefill kernel that reads the packed 4-bit weights directly. The
-server takes ~40 s to start, because it measures its cost curves first, against MTPLX's ~10 s.
+server's first start takes ~40 s, because it measures its cost curves first; later starts reuse
+the saved curves and take ~7 s, against MTPLX's ~10 s.
 
 All tables are in [bench/runtimes/summary-tree.md](bench/runtimes/summary-tree.md). The MTPLX
 rows were measured two days before the tree rows.
@@ -148,8 +149,10 @@ uv venv && uv pip install -e .
 ```
 
 On first run it downloads [`Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed`](https://huggingface.co/Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed)
-(Qwen3.8-27B in 4-bit with its MTP head, Apache-2.0). Startup measures cost curves for about
-40 seconds. `--model` takes any local MTPLX-compatible checkpoint or Hugging Face repo id.
+(Qwen3.8-27B in 4-bit with its MTP head, Apache-2.0). The first start measures cost curves for
+about 35 seconds and saves them to `~/.cache/mlx-tree-spec/cost-curves.json`; later starts with
+the same model, code, library versions, GPU, macOS and KV setting load them and are ready in
+~7 s (`--remeasure-curves` measures again, `--no-curve-cache` never saves). `--model` takes any local MTPLX-compatible checkpoint or Hugging Face repo id.
 
 ```bash
 curl -s localhost:8090/v1/chat/completions -H 'content-type: application/json' \
@@ -187,8 +190,8 @@ MLX_TREE_SPEC_MODEL=Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed .venv/bin/pytest
   quality held in the eval above (30/30 vs the MTPLX baseline's 29/30).
 - Prefill is within 1–2% of stock MLX's kernels in-process (and 2–5% faster than MTPLX's MTP
   server from 4K tokens up), but Splash's Neural Engine prefill reaches the first token about
-  20% sooner from 4K up. Startup takes ~40 s because the server measures its cost curves
-  first.
+  20% sooner from 4K up. The first start takes ~40 s because the server measures its cost
+  curves; any code or library change measures them again.
 - Greedy decoding at around 9K context isn't exactly repeatable from run to run, even with
   plain decoding; the cause isn't found yet.
 

@@ -108,3 +108,24 @@ def test_prefill_kernel(m, k, n, bk):
     exact = x.astype(mx.float32) @ mx.dequantize(wq, s, b, group_size=64, bits=4).astype(mx.float32).T
     err = lambda a: mx.abs(a.astype(mx.float32) - exact).max().item()
     assert err(y) <= err(ref) * 1.01
+
+
+def test_curve_cache_roundtrip(tmp_path):
+    from mlx_tree_spec.server import curves_key, load_curves, save_curves
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    (model / "model.safetensors").write_bytes(b"x" * 10)
+    key = curves_key(str(model), 16384)
+    assert key == curves_key(str(model), 16384) != curves_key(str(model), 8192)
+    path = tmp_path / "curves.json"
+    assert load_curves(path, key) is None
+    curve, draft = ((2, 30.0), (4, 33.5)), (1.2, 0.4)
+    long = (((2, 41.0), (4, 46.0)), 3.0, (1.9, 0.6), 233, 16384)
+    save_curves(path, key, "m", curve, 2.5, draft, long)
+    save_curves(path, "other", "m", curve, 2.5, draft, None)
+    assert load_curves(path, key) == (curve, 2.5, draft, long)
+    assert load_curves(path, "other") == (curve, 2.5, draft, None)
+    (model / "model.safetensors").write_bytes(b"x" * 11)  # new weights: a new key
+    assert curves_key(str(model), 16384) != key

@@ -36,7 +36,8 @@ all MLX work (MLX ties streams to threads); a request whose client disconnects
 (e.g. timed out) is dropped at the next step. While idle within
 --keepalive-window of the last request, that thread runs a tiny kernel every
 second so macOS keeps the weights' Metal residency (see KEEPALIVE_S). Each request is logged as a JSON
-line (--log).
+line (--log). The cost curves measured at startup (~30 s) are saved to --curve-cache and reused
+while nothing they depend on has changed (curves_key); --remeasure-curves measures them again.
 
   mlx-tree-spec-server --port 8090 --max-batch 4
 """
@@ -44,7 +45,10 @@ line (--log).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import platform
 import queue
 import socket
 import threading
@@ -52,6 +56,7 @@ import time
 import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import metadata
 from pathlib import Path
 
 import mlx.core as mx
@@ -76,6 +81,48 @@ KEEPALIVE_WINDOW_S = 600.0
 MIN_SNAPSHOT = 256  # shortest shared prefix worth a snapshot
 BANK = 4  # snapshots kept
 RECENT = 8  # recent prompts a new one is matched against for a snapshot point
+CURVE_CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "mlx-tree-spec" / "cost-curves.json"
+
+
+def curves_key(model_path: str, curve_context: int) -> str:
+    """Everything the measured cost curves depend on: the checkpoint (config and
+    weight file sizes), this package's code, the MLX / mlx-lm / MTPLX versions,
+    the GPU, macOS, the KV cache format and the long-curve context."""
+    h = hashlib.sha256()
+    root = Path(model_path)
+    h.update((root / "config.json").read_bytes())
+    for f in sorted(root.glob("*.safetensors")):
+        h.update(f"{f.name}:{f.stat().st_size}".encode())
+    for f in sorted(Path(__file__).parent.glob("*.py")):
+        h.update(f.read_bytes())
+    versions = [metadata.version(p) for p in ("mlx", "mlx-lm", "mtplx")]
+    h.update(json.dumps([versions, mx.device_info().get("device_name"), platform.mac_ver()[0],
+                         kv8.ENABLED, curve_context]).encode())
+    return h.hexdigest()[:16]
+
+
+def load_curves(path: Path, key: str):
+    """(curve, row_ms, draft, long) saved under `key`, or None."""
+    try:
+        e = json.loads(path.read_text())[key]
+    except (OSError, ValueError, KeyError):
+        return None
+    tup = lambda c: tuple(tuple(x) for x in c)
+    long = e["long"] and (tup(e["long"][0]), e["long"][1], tuple(e["long"][2]), *e["long"][3:])
+    return tup(e["curve"]), e["row_ms"], tuple(e["draft"]), long
+
+
+def save_curves(path: Path, key: str, model_id: str, curve, row_ms, draft, long) -> None:
+    try:
+        saved = json.loads(path.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    saved[key] = {"model": model_id, "measured": time.strftime("%Y-%m-%d %H:%M"),
+                  "curve": curve, "row_ms": row_ms, "draft": draft, "long": long}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(saved, indent=1))
+    tmp.replace(path)
 
 
 class Job:
@@ -102,10 +149,12 @@ class Job:
 class Engine:
     def __init__(self, model: str, config: tuple[int, int, int, int], curve_context: int, log: str | None, max_batch: int,
                  cache_limit_gb: float = 2.0, default_effort: str | None = None, trace_log: str | None = None,
-                 keepalive_window_s: float = KEEPALIVE_WINDOW_S):
+                 keepalive_window_s: float = KEEPALIVE_WINDOW_S, curve_cache: Path | None = CURVE_CACHE,
+                 remeasure: bool = False):
         mx.set_cache_limit(int(cache_limit_gb * 1e9))
         mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
-        self.rt = load(ts.resolve_model(model))
+        model_path = ts.resolve_model(model)
+        self.rt = load(model_path)
         self.model_id = Path(model.rstrip("/")).name
         self.inner = getattr(self.rt.model, "language_model", self.rt.model)
         self.tok = self.rt.tokenizer
@@ -126,20 +175,31 @@ class Engine:
         self.jobs: queue.Queue[Job] = queue.Queue()
 
         t = time.perf_counter()
-        self.curve, self.row_ms, self.draft = tv.measure_tree_curve(self.rt, self.inner, self.drafter, self.tok)
-        self.long = None
-        if curve_context:
-            text = (ts.DATA / "code_32k.txt").read_text()
-            ids = self.tok.encode(text)[:curve_context]
-            curve_l, row_l, draft_l = tv.measure_tree_curve(self.rt, self.inner, self.drafter, self.tok, context=ids)
-            self.long = (curve_l, row_l, draft_l, ts.VERIFY_MS_CTX[0], len(ids))
+        key = curve_cache and curves_key(model_path, curve_context)
+        saved = None if remeasure or not curve_cache else load_curves(curve_cache, key)
+        if saved:
+            self.curve, self.row_ms, self.draft, self.long = saved
+            # one short pass, so the first request doesn't pay for compiling the kernels
+            tv.measure_tree_curve(self.rt, self.inner, self.drafter, self.tok, points=(2,))
+            how = f"loaded from {curve_cache}"
+        else:
+            self.curve, self.row_ms, self.draft = tv.measure_tree_curve(self.rt, self.inner, self.drafter, self.tok)
+            self.long = None
+            if curve_context:
+                text = (ts.DATA / "code_32k.txt").read_text()
+                ids = self.tok.encode(text)[:curve_context]
+                curve_l, row_l, draft_l = tv.measure_tree_curve(self.rt, self.inner, self.drafter, self.tok, context=ids)
+                self.long = (curve_l, row_l, draft_l, ts.VERIFY_MS_CTX[0], len(ids))
+            if curve_cache:
+                save_curves(curve_cache, key, self.model_id, self.curve, self.row_ms, self.draft, self.long)
+            how = "measured" + (f", saved to {curve_cache}" if curve_cache else "")
         ts._PREFILLED.clear()
         mx.clear_cache()
         self.keepalive_window_s = keepalive_window_s
         self._probe = mx.ones((64, 64))
         mx.eval(self._probe)
         self.last_work = time.monotonic()
-        print(f"cost curves measured in {time.perf_counter() - t:.0f} s; ready", flush=True)
+        print(f"cost curves {how} in {time.perf_counter() - t:.0f} s; ready", flush=True)
 
     def _idle_wait(self) -> float | None:
         """How long an idle engine waits for a request before a keepalive beat
@@ -228,7 +288,7 @@ class Engine:
                     continue
                 try:
                     st, meta = self._begin(job)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     job.error = e
                     job.end()
                     continue
@@ -245,7 +305,7 @@ class Engine:
                 continue
             try:
                 tv.batch_step(self.rt, self.inner, self.drafter, [st for _, st, _ in active])
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 for job, _, _ in active:
                     job.error = e
                     job.end()
@@ -435,7 +495,7 @@ def serve(engine: Engine, host: str, port: int) -> None:
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._send(200, {"object": "list", "data": [{"id": engine.model_id, "object": "model"}]})
             elif self.path.rstrip("/") == "/health":
@@ -443,7 +503,7 @@ def serve(engine: Engine, host: str, port: int) -> None:
             else:
                 self._send(404, {"error": {"message": f"no route {self.path}"}})
 
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
                 self._send(404, {"error": {"message": f"no route {self.path}"}})
                 return
@@ -453,7 +513,7 @@ def serve(engine: Engine, host: str, port: int) -> None:
                     raise ValueError("streaming is not supported with prompt_ids")
                 if not isinstance(body.get("messages"), list) and not isinstance(body.get("prompt_ids"), list):
                     raise ValueError("messages (or prompt_ids) must be a list")
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 self._send(400, {"error": {"message": repr(e)}})
                 return
             job = Job(body, self.headers.get("x-mtplx-cache-mode", "") == "stateless")
@@ -559,12 +619,22 @@ def main() -> None:
                     help=f"8-bit KV cache for the attention layers from {kv8.MIN_CONTEXT} cached tokens on (kv8.py): "
                          "about half the KV memory (~1 GB per request at 32K), same speed, not bit-exact vs bf16 KV; "
                          "--no-kv8 keeps the bf16 cache (default: on)")
+    ap.add_argument("--curve-cache", type=Path, default=CURVE_CACHE,
+                    help="file the startup cost curves are saved to and reused from while the model, this code, the "
+                         "MLX/MTPLX versions, the GPU, macOS, --kv8 and --curve-context stay the same "
+                         "(default: %(default)s)")
+    ap.add_argument("--no-curve-cache", dest="curve_cache", action="store_const", const=None,
+                    help="measure the cost curves at every start and save nothing")
+    ap.add_argument("--remeasure-curves", action="store_true",
+                    help="measure the cost curves again and replace the saved ones (e.g. if they were measured while "
+                         "the machine was busy)")
     args = ap.parse_args()
     kv8.ENABLED = args.kv8  # before Engine, so the cost curves at --curve-context see the same cache
     print(POWERED_BY, flush=True)
     ts.require_m5_gpu()
     engine = Engine(args.model, tuple(int(x) for x in args.fork.split(",")), args.curve_context, args.log, args.max_batch,
-                    args.cache_limit_gb, args.default_effort, args.trace_log, args.keepalive_window)
+                    args.cache_limit_gb, args.default_effort, args.trace_log, args.keepalive_window,
+                    args.curve_cache, args.remeasure_curves)
     print(f"serving on http://{args.host}:{args.port} (max batch {args.max_batch})", flush=True)
     serve(engine, args.host, args.port)
 

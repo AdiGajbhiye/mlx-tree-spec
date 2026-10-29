@@ -124,7 +124,9 @@ prefill included; not part of this repo):
   them at once and verifies every tree in one target pass.
 - **Prompt-prefix reuse.** Linear-attention state can't be trimmed, so the server keeps snapshots
   at the user-turn boundary and at prefixes shared with recent prompts, and resumes from the
-  longest match.
+  longest match. Up to 4 snapshots stay in memory. Each one is also written to disk while the
+  server is idle, so a prompt resumes after a restart too: a 15.4K-token system prompt resumed
+  from disk with a 0.2 s prefill instead of 21 s, and the same reply.
 - **Target-exact acceptance.** A drafted token is kept only if it is the token the target itself
   picks at that position (its argmax, or its sample at `temperature > 0`). The draft head changes
   speed, not what gets generated.
@@ -170,7 +172,10 @@ second, so macOS keeps the weights resident and the next prefill doesn't pay ~0.
 them; `--keepalive-window 0` turns this off. By default the attention KV cache switches to 8
 bits once a request passes 8K cached tokens: about 1 GB less per request at 32K, with speed
 within run-to-run noise of the bf16 cache, but the text is not bit-exact against it.
-`--no-kv8` keeps the bf16 cache. `--help` lists the options.
+`--no-kv8` keeps the bf16 cache. Prefix snapshots go to `~/.cache/mlx-tree-spec/snapshots`
+(about 1.2 GB per 16K tokens, least recently used deleted beyond `--snapshot-disk-gb`, default
+20). They hold the prompts' tokens, so the prompt text is on disk; `--snapshot-disk-gb 0` keeps
+them in memory only. `--help` lists the options.
 
 Run the tests (the lossless check loads the model):
 

@@ -38,6 +38,8 @@ all MLX work (MLX ties streams to threads); a request whose client disconnects
 second so macOS keeps the weights' Metal residency (see KEEPALIVE_S). Each request is logged as a JSON
 line (--log). The cost curves measured at startup (~30 s) are saved to --curve-cache and reused
 while nothing they depend on has changed (curves_key); --remeasure-curves measures them again.
+Prefix snapshots are also written to disk while the server is idle (snapshot_store.py, up to
+--snapshot-disk-gb), so prompts resume from prefixes seen before a restart or evicted from BANK.
 
   mlx-tree-spec-server --port 8090 --max-batch 4
 """
@@ -65,6 +67,7 @@ from mlx_lm.models.cache import KVCache
 from . import kv8
 from . import long_attention
 from . import packed_linear
+from . import snapshot_store
 from . import tree_spec as ts
 from . import tree_verify as tv
 from . import POWERED_BY
@@ -81,13 +84,21 @@ KEEPALIVE_WINDOW_S = 600.0
 MIN_SNAPSHOT = 256  # shortest shared prefix worth a snapshot
 BANK = 4  # snapshots kept
 RECENT = 8  # recent prompts a new one is matched against for a snapshot point
-CURVE_CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "mlx-tree-spec" / "cost-curves.json"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "mlx-tree-spec"
+CURVE_CACHE = CACHE_DIR / "cost-curves.json"
+SNAPSHOT_DIR = CACHE_DIR / "snapshots"
+SNAPSHOT_DISK_GB = 20.0
 
 
 def curves_key(model_path: str, curve_context: int) -> str:
-    """Everything the measured cost curves depend on: the checkpoint (config and
-    weight file sizes), this package's code, the MLX / mlx-lm / MTPLX versions,
-    the GPU, macOS, the KV cache format and the long-curve context."""
+    """Everything the measured cost curves depend on: setup_key's, the KV cache
+    format and the long-curve context."""
+    return setup_key(model_path, kv8.ENABLED, curve_context)
+
+
+def setup_key(model_path: str, *extra) -> str:
+    """The checkpoint (config and weight file sizes), this package's code, the MLX /
+    mlx-lm / MTPLX versions, the GPU and macOS, plus `extra`."""
     h = hashlib.sha256()
     root = Path(model_path)
     h.update((root / "config.json").read_bytes())
@@ -96,8 +107,7 @@ def curves_key(model_path: str, curve_context: int) -> str:
     for f in sorted(Path(__file__).parent.glob("*.py")):
         h.update(f.read_bytes())
     versions = [metadata.version(p) for p in ("mlx", "mlx-lm", "mtplx")]
-    h.update(json.dumps([versions, mx.device_info().get("device_name"), platform.mac_ver()[0],
-                         kv8.ENABLED, curve_context]).encode())
+    h.update(json.dumps([versions, mx.device_info().get("device_name"), platform.mac_ver()[0], *extra]).encode())
     return h.hexdigest()[:16]
 
 
@@ -150,7 +160,7 @@ class Engine:
     def __init__(self, model: str, config: tuple[int, int, int, int], curve_context: int, log: str | None, max_batch: int,
                  cache_limit_gb: float = 2.0, default_effort: str | None = None, trace_log: str | None = None,
                  keepalive_window_s: float = KEEPALIVE_WINDOW_S, curve_cache: Path | None = CURVE_CACHE,
-                 remeasure: bool = False):
+                 remeasure: bool = False, snapshot_dir: Path = SNAPSHOT_DIR, snapshot_disk_gb: float = SNAPSHOT_DISK_GB):
         mx.set_cache_limit(int(cache_limit_gb * 1e9))
         mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
         model_path = ts.resolve_model(model)
@@ -170,6 +180,9 @@ class Engine:
         self.trace_log = open(trace_log, "a") if trace_log else None
         self.default_effort = default_effort
         self.bank: list[tuple] = []  # snapshots (tokens, cache, mtp_cache, last target hidden), most recent last
+        self.store = (snapshot_store.SnapshotStore(snapshot_dir, setup_key(model_path), int(snapshot_disk_gb * 1e9))
+                      if snapshot_disk_gb > 0 else None)
+        self.hit = None  # where the last prefill resumed from: "memory", "disk" or None
         self.user_turn = self.tok.encode("<|im_start|>user")
         self.recent: deque[list[int]] = deque(maxlen=RECENT)
         self.jobs: queue.Queue[Job] = queue.Queue()
@@ -226,6 +239,15 @@ class Engine:
         t0 = time.perf_counter()
         hits = [] if stateless else [b for b in self.bank if len(b[0]) < len(prompt) and prompt[: len(b[0])] == b[0]]
         snap = max(hits, key=lambda b: len(b[0]), default=None)
+        self.hit = snap and "memory"
+        if self.store and not stateless:
+            found = self.store.find(prompt, longer_than=len(snap[0]) if snap else 0)
+            loaded = found and self.store.load(found[1], prompt, self.inner.make_cache(),
+                                               [KVCache() for _ in self.rt.model.mtp.layers])
+            if loaded:
+                snap, self.hit = loaded, "disk"
+                hits.append(snap)
+                self.bank = [b for b in self.bank if b[0] != snap[0]][-(BANK - 1) :] + [snap]
         start = 0
         if snap is not None:
             self.bank.remove(snap)
@@ -254,6 +276,8 @@ class Engine:
                 snap = (prompt[:j], ts.repeat_cache(cache, 1), ts.repeat_cache(mtp_cache, 1), prev_h)
                 mx.eval([c.state for c in snap[1] + snap[2]])
                 self.bank = [b for b in self.bank if b[0] != snap[0]][-(BANK - 1) :] + [snap]
+                if self.store:
+                    self.store.queue(snap)
         bonus = int(tv.choose(logits[0, -1], temperature).item())
         root_g = self._mtp(prev_h, [bonus], mtp_cache)[:, -1, :]
         mx.eval(root_g)
@@ -277,6 +301,10 @@ class Engine:
         active: list[tuple[Job, tv.ForkState, dict]] = []
         while True:
             while len(active) < self.max_batch:
+                if not active and self.store and self.store.pending and self.jobs.empty():
+                    saved = self.store.flush()  # idle: write one queued snapshot to disk
+                    print(json.dumps({"snapshot_saved": saved}), flush=True)
+                    continue
                 try:
                     job = self.jobs.get(block=not active, timeout=None if active else self._idle_wait())
                 except queue.Empty:
@@ -337,7 +365,7 @@ class Engine:
         state, cached = self.prefill(prompt, temperature, job.stateless)
         policy = tv.ForkPolicy(self.depth, self.branches, self.branch_depth, self.sibs, self.draft, self.curve, self.row_ms, self.long)
         st = tv.ForkState(self.inner, self.drafter, max_tokens, self.eos, state, policy, temperature)
-        meta = dict(prompt=prompt, thinking=thinking, temperature=temperature, cached=cached, t0=t0,
+        meta = dict(prompt=prompt, thinking=thinking, temperature=temperature, cached=cached, cached_from=self.hit, t0=t0,
                     t_first=time.perf_counter(), batch=0, effort=kwargs.get("reasoning_effort"))
         job.thinking = thinking
         return st, meta
@@ -373,7 +401,7 @@ class Engine:
                 reasoning, content, n_reason = content, "", len(gen)
         content = content.lstrip()
         rec = dict(
-            prompt_tokens=len(prompt), cached_tokens=meta["cached"], completion_tokens=len(gen), reasoning_tokens=n_reason,
+            prompt_tokens=len(prompt), cached_tokens=meta["cached"], cached_from=meta["cached_from"], completion_tokens=len(gen), reasoning_tokens=n_reason,
             prefill_s=round(stats["prefill_s"], 3), decode_s=round(decode_s, 3),
             total_s=round(time.perf_counter() - meta["t0"], 3),
             decode_tok_s=round((len(out) - 1) / max(decode_s, 1e-9), 1), tokens_per_step=round(stats["tokens_per_step"], 2),
@@ -628,13 +656,19 @@ def main() -> None:
     ap.add_argument("--remeasure-curves", action="store_true",
                     help="measure the cost curves again and replace the saved ones (e.g. if they were measured while "
                          "the machine was busy)")
+    ap.add_argument("--snapshot-dir", type=Path, default=SNAPSHOT_DIR,
+                    help="where prefix snapshots are written, one directory per model/code/library setup; they hold the "
+                         "prompts' tokens in plain form (default: %(default)s)")
+    ap.add_argument("--snapshot-disk-gb", type=float, default=SNAPSHOT_DISK_GB,
+                    help="disk kept for prefix snapshots, least recently used deleted first (~1.1 GB per 16K-token "
+                         "prefix; 0: memory only, as before) (default: %(default)s)")
     args = ap.parse_args()
     kv8.ENABLED = args.kv8  # before Engine, so the cost curves at --curve-context see the same cache
     print(POWERED_BY, flush=True)
     ts.require_m5_gpu()
     engine = Engine(args.model, tuple(int(x) for x in args.fork.split(",")), args.curve_context, args.log, args.max_batch,
                     args.cache_limit_gb, args.default_effort, args.trace_log, args.keepalive_window,
-                    args.curve_cache, args.remeasure_curves)
+                    args.curve_cache, args.remeasure_curves, args.snapshot_dir, args.snapshot_disk_gb)
     print(f"serving on http://{args.host}:{args.port} (max batch {args.max_batch})", flush=True)
     serve(engine, args.host, args.port)
 

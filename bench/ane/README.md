@@ -17,3 +17,8 @@ uv venv -p 3.12 /tmp/ane-venv && uv pip install -p /tmp/ane-venv/bin/python "mlx
 - `capture_layers.py MODEL_DIR` (this repo's venv; loads the model): saves real FFN inputs and
   weights of three layers to `real_layers.npz` (3.3 GB).
 - `split_accuracy.py`: error of GPU + ANE against an fp32 reference, next to the GPU alone's.
+- `exact_split.py`: MLX's 4-bit weights written exactly in Core ML's blockwise format
+  (`s * (q - offset)`, `offset = -b / s`), next to fp16 and int8 per-channel: ANE time and error
+  against an fp32 reference.
+- `exact_control.py`: the same models on the CPU, the GPU and the ANE, to tell weight error from
+  arithmetic error.

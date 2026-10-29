@@ -2,13 +2,19 @@
 
 Measurements from building the decoder, newest first. All on one M5 Max (36 GB) with Swift 1.5 4-bit (a Qwen3.8-27B fine-tune), greedy, unless noted. Raw JSON for the scenario sweeps is in [results/](../results); the agentic coding eval mentioned below is a separate private suite (10 coding-agent tasks, 3 trials each, pass/fail graded) and is not part of this repo.
 
-# Startup curve cache, and a Neural Engine prefill test (2026-10-30)
+# Startup curve cache, prefix snapshots on disk, and a Neural Engine prefill test (2026-10-30)
 
 ## Saved cost curves
 The server saves its startup cost curves to `~/.cache/mlx-tree-spec/cost-curves.json` and reuses them. The key covers the checkpoint's config and weight sizes, this package's source, the MLX, mlx-lm and MTPLX versions, the GPU, macOS, `--kv8` and `--curve-context`.
 - Cold start 43 s, warm start 7 s. A warm start still runs one short tree pass so that nothing compiles on the first request: the same 256-token reply took 1.97 s after a warm start and 2.02 s after a cold one.
 - Two cold measurements agree within 0-4% at most node counts, and within 12% at a few (2 and 20 nodes). A saved curve is as good as a fresh one.
 - `--remeasure-curves` replaces the saved curves; `--no-curve-cache` measures at every start and saves nothing.
+
+## Prefix snapshots on disk (snapshot_store.py)
+Every prefix snapshot the server takes (user-turn start, longest prefix shared with a recent prompt) is queued and written to `~/.cache/mlx-tree-spec/snapshots/<setup key>/` by the engine thread while no request is active, as one safetensors file with the tokens, every target and MTP cache layer exactly as prefill left it (bf16) and the last hidden state. A prompt resumes from the longest of the in-memory and on-disk prefixes; a disk hit is loaded into the in-memory bank. Files beyond `--snapshot-disk-gb` (default 20) are deleted, least recently used first, across all setup directories.
+- 15.4K-token system prompt + question: prefill 21.0 s. After a restart, the same system prompt with another question resumed 15,445 tokens from disk: prefill 0.20 s (0.16 s from memory). The greedy reply matched the one before the restart exactly.
+- One snapshot at 15.4K tokens is 1.17 GB and blocked the idle engine for 0.14 s (the write lands in the page cache). A load after a reboot reads from the SSD and was not timed.
+- Each new conversation leaves two snapshots a few tokens apart (the user-turn start and the shared prefix), so the disk holds about 8 conversations of 16K tokens at the default budget.
 
 ## Neural Engine FFN split for prefill (prototype: no-go through public Core ML)
 Splash prefills about 13% faster with its ANE split than without it (39.4 vs 44.7 s TTFT at 32K). Splash goes through the private AppleNeuralEngine framework, with W8A8 Hadamard-rotated programs and IOSurface handoffs. This tests the public route: a Core ML ML Program (1x1 convs on (1, C, 1, T), fp16 activations) runs the trailing intermediate channels of one FFN layer, while MLX runs the leading channels in 4-bit. Scripts and setup are in `bench/ane/`.
@@ -36,6 +42,7 @@ Speed: one layer at the real shapes (5120 -> 17408 -> 5120). Times include copyi
   | split, 20.6% on the ANE | 1.9e-2 | 1.2e-2 | 6.4e-3 |
 
   The ANE part alone is off by 1.4-6.7% (int8 per-channel weights over 4-bit group-64 values, plus fp16 math), worst in the early layers where activations are small. Nothing overflowed. The split is 1.6-5x the GPU's own rounding error per layer, and that error would land in every prompt's KV cache and GatedDeltaNet state.
+- Exact weights don't help. MLX's format (`w = s*q + b`, group 64) maps exactly onto Core ML's blockwise `s*(q - offset)` with `offset = -b/s` in fp16 (`bench/ane/exact_split.py`), but the ANE doesn't run it. With uint4 or int8 data, the 14.7% share takes 95-104 ms, the same as on CPU only, with the CPU's error: it falls back. On the ANE itself, even exact dense fp16 weights give 1.0e-2 relative error, against 5.0e-3 for MLX's bf16 GPU path and 4.8e-4 for Core ML on the GPU with the same fp16 model (`exact_control.py`). The ANE's own arithmetic is coarser, so no weight format makes the split match the GPU. The closest is fp16 weights: the 14.7% share takes 22.7 ms against 24.6 ms for the GPU's lead, about 1.13x on the FFN, with an fp16 copy of +5 GB.
 - Verdict: not worth building on this route. It would gain ~12% prefill at a cost of +3.5 GB resident, 1.6-5x per-layer error, and 64 Core ML models to compile and keep loaded (load time not measured). Worth revisiting only with weights the ANE can read without a full copy (Splash requantizes one layer ahead into double-buffered surfaces, which public Core ML can't do), and with an end-to-end acceptance and quality check first.
 
 # Prefill kernel on the packed layout (2026-10-27)

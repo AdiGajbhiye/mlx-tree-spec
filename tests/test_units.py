@@ -129,3 +129,70 @@ def test_curve_cache_roundtrip(tmp_path):
     assert load_curves(path, "other") == (curve, 2.5, draft, None)
     (model / "model.safetensors").write_bytes(b"x" * 11)  # new weights: a new key
     assert curves_key(str(model), 16384) != key
+
+
+def _fake_snapshot(n):
+    import mlx.core as mx
+    from mlx_lm.models.cache import ArraysCache, KVCache
+
+    kv, gdn, mtp = KVCache(), ArraysCache(2), KVCache()
+    kv.state = (mx.random.normal((1, 2, n, 8)).astype(mx.bfloat16), mx.random.normal((1, 2, n, 8)).astype(mx.bfloat16))
+    gdn.cache = [mx.random.normal((1, 3, 4)), None]
+    mtp.state = (mx.ones((1, 1, n, 8)), mx.zeros((1, 1, n, 8)))
+    return list(range(100, 100 + n)), [kv, gdn, KVCache()], [mtp], mx.ones((1, 1, 16))
+
+
+def _fresh():
+    from mlx_lm.models.cache import ArraysCache, KVCache
+
+    return [KVCache(), ArraysCache(2), KVCache()], [KVCache()]
+
+
+def test_snapshot_store(tmp_path):
+    import mlx.core as mx
+
+    from mlx_tree_spec.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(tmp_path, "setup", budget_bytes=10**9)
+    snap = _fake_snapshot(12)
+    store.queue(snap)
+    store.queue(snap)  # queued once
+    assert len(store.pending) == 1
+    store.flush()
+    assert not store.pending and len(store.entries) == 1
+    store.queue(snap)  # already on disk
+    assert not store.pending
+
+    store = SnapshotStore(tmp_path, "setup", budget_bytes=10**9)  # a restart finds it
+    prompt = snap[0] + [7, 8, 9]
+    assert store.find(snap[0]) is None  # never the whole prompt
+    assert store.find(prompt, longer_than=12) is None
+    n, f = store.find(prompt)
+    assert n == 12
+    tokens, cache, mtp_cache, prev_h = store.load(f, prompt, *_fresh())
+    assert tokens == snap[0] and cache[0].offset == 12 and cache[2].keys is None and cache[1].cache[1] is None
+    for a, b in ((cache[0].state[0], snap[1][0].state[0]), (cache[1].cache[0], snap[1][1].cache[0]),
+                 (mtp_cache[0].state[1], snap[2][0].state[1]), (prev_h, snap[3])):
+        assert a.dtype == b.dtype and mx.array_equal(a, b)
+    assert store.load(f, [0] + prompt, *_fresh()) is None  # not a prefix: dropped
+    assert store.find(prompt) is None and not f.exists()
+
+
+def test_snapshot_store_budget_and_layout(tmp_path):
+    from mlx_lm.models.cache import KVCache
+
+    from mlx_tree_spec.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(tmp_path, "a", budget_bytes=10**9)
+    for n in (8, 16):
+        store.queue(_fake_snapshot(n))
+        store.flush()
+    size = max(f.stat().st_size for f in tmp_path.glob("a/*"))
+    other = SnapshotStore(tmp_path, "b", budget_bytes=size + 1)  # the budget spans setups
+    other.queue(_fake_snapshot(4))
+    other.flush()
+    assert len(list(tmp_path.glob("*/*.safetensors"))) == 1 and len(other.entries) == 1
+    store = SnapshotStore(tmp_path, "b", budget_bytes=10**9)
+    n, f = store.find(list(range(100, 110)))
+    assert store.load(f, list(range(100, 110)), [KVCache()], [KVCache()]) is None  # wrong layout: dropped
+    assert not f.exists()

@@ -51,16 +51,21 @@ server_cmd() {
     Q5) echo "env MTPLX_CONTEXT_COPY=0 $MTPLX serve --model $BASE/mtplx-bare-speed --generation-mode mtp --mtp --depth 3 --profile sustained --ssd-session-cache off --no-auth --yes --port $PORT" ;;
     # mlx-tree-spec (this repo), shipped defaults: tree-speculative decoding with the MTP head drafting.
     # Measures cost curves for ~40 s before it listens. No prefix reuse here: the nonce leads every prompt.
-    T1) echo "$TREE --model $SWIFT_MLX_TEXT --port $PORT" ;;  # vs C2 / C2n
-    T2) echo "$TREE --model $BASE/mtplx-bare-speed --port $PORT" ;;  # vs Q5 (Q4 for plain decoding)
+    T1) echo "$TREE --model $SWIFT_MLX_TEXT --no-kv8 --port $PORT" ;;  # vs C2 / C2n
+    T2) echo "$TREE --model $BASE/mtplx-bare-speed --no-kv8 --port $PORT" ;;  # vs Q5 (Q4 for plain decoding); bf16 KV, as measured before kv8 became the default
+    T2k) echo "$TREE --model $BASE/mtplx-bare-speed --kv8 --port $PORT" ;;  # T2 with 8-bit KV from 8K (the server default since 2026-10-30)
     # Splash (incoai), shipped defaults (INT8 KV, ANE prefill, DFlash2 draft) on Q1's GGUF.
     # Context capped like the llama.cpp rows; left on auto it plans for the native 256K window.
     SP) echo "$SPLASH serve --model local/qwen38-27b --model-dir $BASE/gguf/Qwen3.8-27B-UD-Q4_K_M.gguf --draft-model $DFLASH2 --default-reasoning-effort none --max-context $CTX --port $PORT" ;;
+    # README's quick start as is (automatic context and memory), thinking off as for every config
+    SPa) echo "$SPLASH serve --model local/qwen38-27b --model-dir $BASE/gguf/Qwen3.8-27B-UD-Q4_K_M.gguf --draft-model $DFLASH2 --default-reasoning-effort none --port $PORT" ;;
+    # the settings of Splash's own accuracy comparison with llama.cpp: BF16 KV, GPU-only prefill
+    SPb) echo "$SPLASH serve --model local/qwen38-27b --model-dir $BASE/gguf/Qwen3.8-27B-UD-Q4_K_M.gguf --draft-model $DFLASH2 --default-reasoning-effort none --max-context $CTX --kv-format bf16 --disable-ane --port $PORT" ;;
   esac
 }
 
 model_for() {  # some servers (mlx-lm, lithos) reject unknown model names
-  case "$1" in A*) echo nvidia/Qwen3.8-27B-NVFP4 ;; B*|Q3|Q3b) echo mlx-community/Qwen3.8-27B-4bit ;; C3) echo "$SWIFT_MLX" ;; T*) echo local ;; SP) echo local/qwen38-27b ;; *) echo local ;; esac
+  case "$1" in A*) echo nvidia/Qwen3.8-27B-NVFP4 ;; B*|Q3|Q3b) echo mlx-community/Qwen3.8-27B-4bit ;; C3) echo "$SWIFT_MLX" ;; T*) echo local ;; SP*) echo local/qwen38-27b ;; *) echo local ;; esac
 }
 
 bench_args_for() {
@@ -68,7 +73,7 @@ bench_args_for() {
   case "$1" in A*) echo "--strict-openai --contexts 128,1024" ;; esac
 }
 
-tokenizer_for() { case "$1" in A*|B*|Q*|T2|SP) echo "$QWEN_TOK" ;; *) echo "$SWIFT_TOK" ;; esac; }
+tokenizer_for() { case "$1" in A*|B*|Q*|T2|T2k|SP*) echo "$QWEN_TOK" ;; *) echo "$SWIFT_TOK" ;; esac; }
 
 free_port() {
   lsof -ti tcp:$PORT -sTCP:LISTEN | xargs kill 2>/dev/null
@@ -110,7 +115,7 @@ for L in "${LABELS[@]}"; do
     echo "$L FAILED to become ready (see logs/$L.server.log)" | tee -a logs/run_all.log
   fi
   kill $spid 2>/dev/null; pkill -P $spid 2>/dev/null
-  case "$L" in SP) pkill -f "splash.*serve" 2>/dev/null ;; esac  # its engine runs as a child process
+  case "$L" in SP*) pkill -f "splash.*serve" 2>/dev/null ;; esac  # its engine runs as a child process
   case "$L" in C*|E*|Q4|Q5) $MTPLX stop --port $PORT >/dev/null 2>&1 ;; esac  # MTPLX only, not T*
   free_port
   sleep 60  # cool down between configs

@@ -175,6 +175,7 @@ Run-to-run noise is about +-3% (outputs differ between runs because the packed k
 - Memory: -1.06 GB of KV at 32K (2.15 -> 1.09 GB); measured -0.9 GB active at 28K.
 - Kernels (16 layers, 32K, ms bf16 -> int8): 1 query 5.9 -> 5.0 (MTPLX int8 vector kernel), 2 queries 6.8 -> 5.5, 4: 7.7 -> 9.3, 8: 11.0 -> 13.2, 16: 20.4 -> 26.1. From 4 queries the flash kernel is compute-bound, not KV-bandwidth-bound; fp16 matmuls with integer conversion and key-splitting did not help.
 - End to end: plain decoding +1%; speculative configs within noise (-3% to +2%). Worth it for memory, not speed. Outputs first differ from bf16 KV after ~110-1450 tokens.
+- 2026-10-30: the server default (`--no-kv8` turns it off; `tree_spec`'s CLI still needs `--kv8`). Runtime harness, same night, T2k vs T2 (`bench/runtimes/summary-splash.md`): decode within noise at every context and task (-5% to +1%), TTFT identical, tokens/step the same, peak footprint 23 vs 24 GB.
 
 ## Open
 - Verify passes of 4-16 queries are compute-bound in the flash kernel at long context (8 queries at 32K: 11 ms for 2.15 GB, ~195 GB/s): a faster multi-query attention kernel would help bf16 and int8 alike.

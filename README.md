@@ -44,6 +44,36 @@ server takes ~40 s to start, because it measures its cost curves first, against 
 All tables are in [bench/runtimes/summary-tree.md](bench/runtimes/summary-tree.md). The MTPLX
 rows were measured two days before the tree rows.
 
+**Against Splash.** [Splash](https://github.com/incoai/splash) 1.5.0 runs the unsloth UD-Q4_K_M
+GGUF of the same model with its trained DFlash2 block drafter, its own Metal kernels and a
+Neural Engine split for prefill. Same harness, same night, 10 minutes idle before each server
+(decode tok/s; TTFT in seconds):
+
+| context | 128 | 1K | 4K | 8K | 16K | 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| Splash, decode | 70.4 | **79.2** | 70.7 | 69.9 | 64.4 | **61.5** |
+| this server, decode | **82.2** | 77.0 | **72.1** | **74.9** | 64.3 | 55.6 |
+| Splash, TTFT | 0.34 | **1.27** | **4.32** | **8.59** | **17.88** | **39.39** |
+| this server, TTFT | 0.34 | 1.41 | 5.26 | 10.66 | 22.35 | 48.52 |
+
+| task (S2) | code | prose | math | json | edit | creative |
+|---|---:|---:|---:|---:|---:|---:|
+| Splash | **97.1** | 62.2 | **110.1** | **120.2** | 89.1 | 48.2 |
+| this server | 85.3 | 62.7 | 103.0 | 100.0 | **127.5** | 50.3 |
+
+Decode is about even overall. Splash's drafter accepts more tokens per pass on code, math and
+JSON (5.2 vs 4.7 on code). The tree wins on edits (8.0 vs 4.8 tokens per pass), where long runs of
+copied text suit it, and at short context. Splash reaches the first token about 20% sooner from
+4K up, mostly from the Neural Engine prefill: with `--disable-ane` its 32K TTFT is 44.7 s. Splash
+peaks at about 25.7 GB here, against 24 GB for this server with the bf16 KV cache these rows used
+and 23 GB with the 8-bit default, which runs within noise of them. Splash's README quick-start settings and
+the settings of its llama.cpp comparison (`--kv-format bf16 --disable-ane`) give the same decode
+picture; all three Splash configs are in
+[bench/runtimes/summary-splash.md](bench/runtimes/summary-splash.md).
+
+![Decode tok/s by prompt length](docs/decode-chart.png)
+![Decode tok/s by task](docs/decode-tasks-chart.png)
+
 **Long-context scenarios.** One request, greedy, tok/s, using the best tree shape for each
 scenario:
 
@@ -134,7 +164,10 @@ server-sent events with one chunk per decode step, i.e. every token accepted in 
 reasoning arrives as `delta.reasoning_content`, and `stream_options.include_usage` adds a final
 usage chunk. For 10 minutes after each request, the idle server runs a tiny GPU kernel every
 second, so macOS keeps the weights resident and the next prefill doesn't pay ~0.2 s to restore
-them; `--keepalive-window 0` turns this off. `--help` lists the options.
+them; `--keepalive-window 0` turns this off. By default the attention KV cache switches to 8
+bits once a request passes 8K cached tokens: about 1 GB less per request at 32K, with speed
+within run-to-run noise of the bf16 cache, but the text is not bit-exact against it.
+`--no-kv8` keeps the bf16 cache. `--help` lists the options.
 
 Run the tests (the lossless check loads the model):
 
@@ -153,7 +186,8 @@ MLX_TREE_SPEC_MODEL=Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed .venv/bin/pytest
   checks that every emitted token is the target's own top choice, up to such near-ties. Task
   quality held in the eval above (30/30 vs the MTPLX baseline's 29/30).
 - Prefill is within 1–2% of stock MLX's kernels in-process (and 2–5% faster than MTPLX's MTP
-  server from 4K tokens up). Startup takes ~40 s because the server measures its cost curves
+  server from 4K tokens up), but Splash's Neural Engine prefill reaches the first token about
+  20% sooner from 4K up. Startup takes ~40 s because the server measures its cost curves
   first.
 - Greedy decoding at around 9K context isn't exactly repeatable from run to run, even with
   plain decoding; the cause isn't found yet.

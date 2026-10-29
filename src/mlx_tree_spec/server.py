@@ -57,6 +57,7 @@ from pathlib import Path
 import mlx.core as mx
 from mlx_lm.models.cache import KVCache
 
+from . import kv8
 from . import long_attention
 from . import packed_linear
 from . import tree_spec as ts
@@ -554,7 +555,12 @@ def main() -> None:
     ap.add_argument("--keepalive-window", type=float, default=KEEPALIVE_WINDOW_S,
                     help="seconds after the last request to keep the GPU warm with a tiny kernel every second, so the "
                          "next prefill doesn't pay ~0.2 s to restore Metal residency (0: off)")
+    ap.add_argument("--kv8", action=argparse.BooleanOptionalAction, default=True,
+                    help=f"8-bit KV cache for the attention layers from {kv8.MIN_CONTEXT} cached tokens on (kv8.py): "
+                         "about half the KV memory (~1 GB per request at 32K), same speed, not bit-exact vs bf16 KV; "
+                         "--no-kv8 keeps the bf16 cache (default: on)")
     args = ap.parse_args()
+    kv8.ENABLED = args.kv8  # before Engine, so the cost curves at --curve-context see the same cache
     print(POWERED_BY, flush=True)
     ts.require_m5_gpu()
     engine = Engine(args.model, tuple(int(x) for x in args.fork.split(",")), args.curve_context, args.log, args.max_batch,
